@@ -1,0 +1,15 @@
+{
+  "name": "luaguard-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "LuaGuard Cloudflare Worker license API",
+  "scripts": {
+    "build": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.40.0"
+  }
+}

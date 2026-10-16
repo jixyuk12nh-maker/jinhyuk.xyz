@@ -1,4 +1,4 @@
-# tm VM status — Phase 9
+# LuaGuard VM status — Phase 9
 
 This repository remains an experimental compiler/VM and packaging prototype. It is not equivalent to Luarmor and is not a production-grade protector.
 

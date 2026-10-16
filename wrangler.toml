@@ -1,8 +1,14 @@
-name = "tm-api"
+name = "luaguard-api"
 main = "cloudflare/worker.js"
-compatibility_date = "2026-10-01"
+compatibility_date = "2026-10-17"
 
-[[d1_databases]]
-binding = "DB"
-database_name = "tm-licenses"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+# Add the D1 binding after creating the database:
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "luaguard-licenses"
+# database_id = "YOUR_D1_DATABASE_ID"
+
+# Add an R2 binding after creating the bucket:
+# [[r2_buckets]]
+# binding = "SCRIPTS"
+# bucket_name = "luaguard-scripts"
