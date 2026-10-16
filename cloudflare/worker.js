@@ -17,10 +17,18 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/v1/license/verify") {
-      const contentLength = Number(request.headers.get("content-length") || 0);
-      if (contentLength > 4096) return json({ ok: false, error: "request_too_large" }, 413);
+      // Enforce the limit on the actual body, not only Content-Length (which may be absent).
+      let rawBody;
+      try {
+        rawBody = await request.text();
+      } catch {
+        return json({ ok: false, error: "invalid_body" }, 400);
+      }
+      if (new TextEncoder().encode(rawBody).byteLength > 4096) {
+        return json({ ok: false, error: "request_too_large" }, 413);
+      }
       let body;
-      try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400); }
+      try { body = JSON.parse(rawBody); } catch { return json({ ok: false, error: "invalid_json" }, 400); }
       if (!body || typeof body !== "object" || Array.isArray(body)) {
         return json({ ok: false, error: "invalid_body" }, 400);
       }
@@ -32,9 +40,14 @@ export default {
       }
       if (!env.DB) return json({ ok: false, error: "database_not_configured" }, 503);
       const keyHash = await sha256Hex(licenseKey);
-      const row = await env.DB.prepare(
-        "SELECT id, product_id, status, allowed_place_ids, expires_at FROM licenses WHERE key_hash = ? AND product_id = ? LIMIT 1"
-      ).bind(keyHash, productId).first();
+      let row;
+      try {
+        row = await env.DB.prepare(
+          "SELECT id, product_id, status, allowed_place_ids, expires_at FROM licenses WHERE key_hash = ? AND product_id = ? LIMIT 1"
+        ).bind(keyHash, productId).first();
+      } catch {
+        return json({ ok: false, error: "database_unavailable" }, 503);
+      }
       if (!row || row.status !== "active") return json({ ok: false, error: "invalid_license" }, 403);
       if (row.expires_at) {
         const expiry = Date.parse(row.expires_at);
@@ -44,7 +57,11 @@ export default {
       let allowed;
       try { allowed = JSON.parse(row.allowed_place_ids || "[]"); } catch { allowed = []; }
       if (!Array.isArray(allowed) || !allowed.map(String).includes(placeId)) return json({ ok: false, error: "place_not_allowed" }, 403);
-      await env.DB.prepare("UPDATE licenses SET last_verified_at = CURRENT_TIMESTAMP WHERE id = ?").bind(row.id).run();
+      try {
+        await env.DB.prepare("UPDATE licenses SET last_verified_at = CURRENT_TIMESTAMP WHERE id = ?").bind(row.id).run();
+      } catch {
+        return json({ ok: false, error: "database_unavailable" }, 503);
+      }
       return json({ ok: true, productId, placeId, verifiedAt: new Date().toISOString() });
     }
 
