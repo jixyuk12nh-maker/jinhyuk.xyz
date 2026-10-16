@@ -37,3 +37,23 @@ This repository remains an experimental compiler/VM and packaging prototype. It 
 - The generated runtime uses Roblox/Luau native tables for table values; some edge-case semantics differ from the Python VM.
 - Opcode permutation is not cryptographic protection. A determined analyst can inspect the runtime and constants.
 - Passing unit tests does not establish full Luau compatibility, performance, or resistance to reverse engineering.
+
+## Phase 10 — embedded runtime argument semantics
+
+- The generated Luau VM now carries an explicit argument count, so nil-valued arguments do not get truncated by Lua table length or `ipairs` behavior.
+- The generated `print` wrapper formats nil, booleans, integral numbers, finite numbers, NaN, infinities, tables, and functions consistently with the prototype's display conventions.
+- This remains a subset VM: multiple return values, varargs, generic iteration, metatables, coroutines, and Roblox APIs are still out of scope. Generated code still requires execution tests in the official Luau/Roblox environment.
+
+## Phase 11 — runtime consistency fixes and architecture notes
+
+- Generated `RETURN` now honors the zero-result form by returning `nil`, matching the Python interpreter's current single-result contract.
+- Added `docs/custom-vm-architecture.md` to document the source-to-bytecode-to-embedded-runtime path and the boundaries of the current subset.
+- Next major compatibility work should start with official Luau execution tests, then multiple returns/varargs and additional syntax. Do not describe the current VM as full Luau-compatible yet.
+
+## Phase 12 — layered per-build encoding
+
+- Added build-specific affine encoding after opcode permutation.
+- Encoded each instruction operand with a build-specific key and instruction-position offset.
+- Stored string constants as XOR-masked UTF-8 byte arrays and decode them only when read by the generated runtime.
+- Added regression coverage confirming plaintext string literals are not emitted directly.
+- Security remains obfuscation, not encryption against a determined analyst. The generated Luau still needs real execution tests in the official Luau/Roblox runtime.

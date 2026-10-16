@@ -52,3 +52,10 @@ For real sales/licensing, add rate limiting, audit logs, key rotation, admin-onl
 ## Limitations
 
 The Python VM and generated Luau runtime support only a subset. Varargs, multiple returns, generic `for ... in`, type annotations, metatables, coroutines, most standard libraries, and Roblox APIs are not fully supported. Passing unit tests does not establish official Luau compatibility or resistance to reverse engineering. See `STATUS.md` and `docs/`.
+
+
+## Build hardening (Phase 12)
+
+Generated builds now use build-specific opcode permutation plus affine opcode encoding, instruction-position-dependent operand masking, and XOR-masked UTF-8 string constants. Passing the same seed reproduces the same build; omitting the seed randomizes build parameters.
+
+These layers raise the effort needed for quick static inspection but are reversible and are not cryptographic protection. The generated runtime must be tested in the official Luau/Roblox environment before production use; this project remains a subset VM rather than a complete Luau implementation.
