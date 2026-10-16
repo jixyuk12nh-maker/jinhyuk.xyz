@@ -1,6 +1,6 @@
 name = "luaguard-api"
 main = "cloudflare/worker.js"
-compatibility_date = "2026-10-17"
+compatibility_date = "2026-10-16"
 
 # Add the D1 binding after creating the database:
 # [[d1_databases]]
