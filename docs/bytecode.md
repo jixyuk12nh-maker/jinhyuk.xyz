@@ -68,3 +68,7 @@ These instructions are compiler-generated and are validated before execution.
 - `LEN A, B`: string byte length or simplified contiguous table prefix length.
 
 The parser also supports colon method-call syntax by inserting the receiver as the first argument. These additions are a limited subset and do not establish full Luau compatibility.
+
+## Embedded runtime note
+
+The standalone generated runtime passes an explicit argument count through calls. This preserves trailing and interior `nil` arguments, which cannot safely be inferred from the length operator on a table containing holes. The runtime currently returns a single value and does not implement varargs or multiple returns.

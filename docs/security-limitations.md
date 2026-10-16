@@ -2,7 +2,9 @@
 
 tm VM is a prototype. It does not create a trusted execution boundary on a user's client, and it cannot guarantee that source logic or embedded constants will remain secret.
 
-Opcode permutation changes numeric opcode IDs between generated builds. It does not encrypt bytecode, and the mapping can be recovered by analyzing the generated interpreter. It should not be advertised as equivalent to a mature commercial protector.
+Each generated build now applies several reversible transformations: opcode IDs are permuted and affine-encoded, instruction operands are masked using per-build keys plus instruction-position-dependent offsets, and string constants are stored as XOR-masked UTF-8 bytes and decoded at runtime. A seed makes a build reproducible; omitting it chooses fresh parameters.
+
+These are obfuscation layers, not cryptographic secrecy. The keys and decoding logic must run on the client and can be recovered by a determined analyst. Numeric constants and runtime behavior can still be inspected, and decrypted strings can be captured during execution. This is a stronger baseline than plain opcode permutation, not a claim of equivalence to a mature commercial protector.
 
 The Python VM is not runnable inside Roblox. The `pack` command emits an experimental Luau interpreter for the supported custom-bytecode subset, but the generated output has not been verified in Roblox Studio or against an official Luau runtime in this environment. Test output in a controlled environment before using it.
 
