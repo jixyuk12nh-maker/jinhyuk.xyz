@@ -11,4 +11,6 @@ migrations_dir = "cloudflare/migrations"
 [assets]
 directory = "./public"
 binding = "ASSETS"
+# Route API and health checks through the Worker before static asset handling.
+run_worker_first = ["/health", "/api/*", "/v1/*"]
 not_found_handling = "single-page-application"

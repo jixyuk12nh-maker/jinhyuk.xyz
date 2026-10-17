@@ -72,7 +72,7 @@ Generated builds use build-specific opcode permutation and affine opcode encodin
 
 ## Jinhyuk.xyz loader modes (2026-10-18 update)
 
-The Worker supports `/api/<scriptName>` loader bootstrap URLs with `keyless` and `key` modes. Script upload remains protected by `ADMIN_API_TOKEN`. In key mode, the generated loader reads the global `Script_key` value and submits it to `/api/loader/resolve`; the Worker checks the stored license hash, status, and expiration before returning code. Create licenses with `POST /api/licenses` using the admin bearer token and the `productId` returned by script registration. The raw key is shown only in the creation response.
+The Worker supports `/api/<scriptName>` loader bootstrap URLs with `keyless` and `key` modes. In this test build, script upload and license-management endpoints do not require an admin API token. This is intentionally insecure and must not be exposed publicly before session-based admin authorization is added. In key mode, the generated loader reads the global `Script_key` value and submits it to `/api/loader/resolve`; the Worker checks the stored license hash, status, and expiration before returning code. Create licenses with `POST /api/licenses` and the `productId` returned by script registration. The raw key is shown only in the creation response.
 
 For an existing D1 database, apply the migration once:
 
@@ -80,7 +80,7 @@ For an existing D1 database, apply the migration once:
 npx wrangler d1 migrations apply tm-db --remote
 ```
 
-For a new database, initialize it with `cloudflare/schema.sql` before deploying. Ensure the D1 binding in `wrangler.toml` points to the intended production database, and set the `ADMIN_API_TOKEN` Worker secret (at least 24 characters).
+For a new database, initialize it with `cloudflare/schema.sql` before deploying. Ensure the D1 binding in `wrangler.toml` points to the intended database. The current test build does not require `ADMIN_API_TOKEN`; add session-based admin authorization before public production use.
 
 Generated keyless loader:
 
@@ -96,3 +96,6 @@ loadstring(game:HttpGet("https://jinhyuk.xyz/api/MyScript"))()
 ```
 
 Note: a client-side loader cannot guarantee prevention of source dumping after code reaches the client. The Worker logs loader requests and enforces license checks for key-mode delivery, but this is not a complete anti-dump system or production-grade rate limiter.
+### API 연결 실패 시 확인
+
+`wrangler.toml`의 `[assets]` 설정에서 `/health`, `/api/*`, `/v1/*` 경로는 `run_worker_first`로 Worker가 먼저 처리해야 합니다. 이 설정이 없으면 SPA 정적 파일 처리기가 API 요청을 가로채 사이트에서 `API 연결 실패`로 표시될 수 있습니다. 수정 후 Worker를 다시 배포하고 `https://jinhyuk.xyz/health`에서 JSON 응답을 확인하세요.
