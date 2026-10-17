@@ -60,3 +60,33 @@ test("database query failures return a controlled 503", async () => {
   assert.equal(result.status, 503);
   assert.equal(result.body.error, "database_unavailable");
 });
+
+
+test("health endpoint reports the R2 binding", async () => {
+  const result = await read(await worker.fetch(request("/health"), { BUCKET: { put() {}, get() {} } }));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.r2Storage, true);
+});
+
+test("script publishing writes code to R2 when BUCKET is bound", async () => {
+  const writes = [];
+  const DB = {
+    prepare() {
+      return {
+        bind() { return { run: async () => ({ meta: { changes: 1 } }), all: async () => ({ results: [] }), first: async () => null }; },
+      };
+    },
+  };
+  const BUCKET = {
+    async put(key, value, options) { writes.push({ key, value, options }); },
+  };
+  const result = await read(await worker.fetch(request("/api/scripts", {
+    method: "POST",
+    body: JSON.stringify({ username: "Jinhyuk", scriptName: "DemoScript", protectedCode: "print('hello')", loaderMode: "keyless" }),
+  }), { DB, BUCKET }));
+  assert.equal(result.status, 201);
+  assert.equal(result.body.storage, "r2");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].key, "scripts/jinhyuk/demoscript.lua");
+  assert.equal(writes[0].value, "print('hello')");
+});
