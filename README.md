@@ -69,3 +69,30 @@ Cloudflare Workers do not execute Roblox Luau. Roblox server code can call this 
 ## Build hardening (Phase 12)
 
 Generated builds use build-specific opcode permutation and affine opcode encoding, instruction-position-dependent operand masking, and XOR-masked UTF-8 string constants. These mechanisms increase the effort needed for quick static inspection but are reversible and are not cryptographic protection.
+
+## Jinhyuk.xyz loader modes (2026-10-18 update)
+
+The Worker supports `/api/<scriptName>` loader bootstrap URLs with `keyless` and `key` modes. Script upload remains protected by `ADMIN_API_TOKEN`. In key mode, the generated loader reads the global `Script_key` value and submits it to `/api/loader/resolve`; the Worker checks the stored license hash, status, and expiration before returning code. Create licenses with `POST /api/licenses` using the admin bearer token and the `productId` returned by script registration. The raw key is shown only in the creation response.
+
+For an existing D1 database, apply the migration once:
+
+```sh
+npx wrangler d1 migrations apply tm-db --remote
+```
+
+For a new database, initialize it with `cloudflare/schema.sql` before deploying. Ensure the D1 binding in `wrangler.toml` points to the intended production database, and set the `ADMIN_API_TOKEN` Worker secret (at least 24 characters).
+
+Generated keyless loader:
+
+```lua
+loadstring(game:HttpGet("https://jinhyuk.xyz/api/MyScript"))()
+```
+
+Generated key loader:
+
+```lua
+Script_key = "YOUR_LICENSE_KEY"
+loadstring(game:HttpGet("https://jinhyuk.xyz/api/MyScript"))()
+```
+
+Note: a client-side loader cannot guarantee prevention of source dumping after code reaches the client. The Worker logs loader requests and enforces license checks for key-mode delivery, but this is not a complete anti-dump system or production-grade rate limiter.
