@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../cloudflare/worker.js";
+import { compileAndPack } from "../cloudflare/compiler.js";
 import { webcrypto } from "node:crypto";
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -82,11 +83,40 @@ test("script publishing writes code to R2 when BUCKET is bound", async () => {
   };
   const result = await read(await worker.fetch(request("/api/scripts", {
     method: "POST",
-    body: JSON.stringify({ username: "Jinhyuk", scriptName: "DemoScript", protectedCode: "print('hello')", loaderMode: "keyless" }),
+    body: JSON.stringify({ username: "Jinhyuk", scriptName: "DemoScript", sourceCode: "print('hello')", loaderMode: "keyless" }),
   }), { DB, BUCKET }));
   assert.equal(result.status, 201);
   assert.equal(result.body.storage, "r2");
   assert.equal(writes.length, 1);
   assert.equal(writes[0].key, "scripts/jinhyuk/demoscript.lua");
-  assert.equal(writes[0].value, "print('hello')");
+  assert.equal(result.body.protected, true);
+  assert.equal(result.body.compiler, "worker-js-lgvm");
+  assert.match(writes[0].value, /local PROTOS =/);
+  assert.doesNotMatch(writes[0].value, /print\('hello'\)/);
+});
+
+
+test("script publishing rejects unsupported source before storage", async () => {
+  const writes = [];
+  const DB = { prepare() { return { bind() { return { run: async () => ({ meta: { changes: 1 } }), all: async () => ({ results: [] }), first: async () => null }; } }; } };
+  const BUCKET = { async put(key, value) { writes.push({ key, value }); } };
+  const result = await read(await worker.fetch(request("/api/scripts", {
+    method: "POST",
+    body: JSON.stringify({ username: "Jinhyuk", scriptName: "BadScript", sourceCode: "local = ???", loaderMode: "keyless" }),
+  }), { DB, BUCKET }));
+  assert.equal(result.status, 400);
+  assert.equal(result.body.error, "compile_failed");
+  assert.equal(writes.length, 0);
+});
+
+
+test("JavaScript compiler packages supported source and masks string constants", () => {
+  const output = compileAndPack('local secret = "private-literal"\nprint(secret)');
+  assert.match(output, /local PROTOS =/);
+  assert.match(output, /getfenv/);
+  assert.doesNotMatch(output, /private-literal/);
+});
+
+test("JavaScript compiler rejects unsupported generic iteration", () => {
+  assert.throws(() => compileAndPack('for key, value in pairs({}) do print(key) end'), /컴파일 오류/);
 });
