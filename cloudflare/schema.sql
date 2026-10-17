@@ -20,8 +20,20 @@ CREATE TABLE IF NOT EXISTS scripts (
   script_key TEXT NOT NULL,
   protected_code TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  loader_mode TEXT NOT NULL DEFAULT 'keyless' CHECK (loader_mode IN ('keyless', 'key')),
+  product_id TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(username_key, script_key)
 );
 CREATE INDEX IF NOT EXISTS idx_scripts_user ON scripts(username_key, updated_at DESC);
+
+-- Loader request events for basic usage and abuse monitoring.
+CREATE TABLE IF NOT EXISTS loader_events (
+  id TEXT PRIMARY KEY,
+  script_name TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  country TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_loader_events_script_created ON loader_events(script_name, created_at DESC);

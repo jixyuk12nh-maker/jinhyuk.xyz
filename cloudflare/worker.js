@@ -37,25 +37,61 @@ async function readJson(request, maxBytes = 600 * 1024) {
   if (new TextEncoder().encode(raw).byteLength > maxBytes) return { error: "request_too_large", status: 413 };
   try { return { value: JSON.parse(raw) }; } catch { return { error: "invalid_json", status: 400 }; }
 }
-async function scriptRoute(request, env, usernameRaw, scriptRaw) {
-  const username = cleanSegment(usernameRaw, 40);
+function loaderBootstrap(scriptName, mode) {
+  const safeName = JSON.stringify(scriptName);
+  const base = 'https://jinhyuk.xyz';
+  if (mode === 'key') {
+    return `-- Jinhyuk.xyz loader | license mode\nlocal HttpService = game:GetService("HttpService")\nlocal scriptName = ${safeName}\nlocal key = rawget(_G, "Script_key") or rawget(getgenv and getgenv() or {}, "Script_key")\nif type(key) ~= "string" or key == "" then error("[Jinhyuk] Script_key is missing", 0) end\nlocal body = HttpService:JSONEncode({scriptName = scriptName, licenseKey = key})\nlocal req = (syn and syn.request) or (http and http.request) or request or http_request\nif type(req) ~= "function" then error("[Jinhyuk] This executor does not support authenticated requests", 0) end\nlocal response = req({Url = "${base}/api/loader/resolve", Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body})\nif not response or (response.StatusCode and response.StatusCode ~= 200) then error("[Jinhyuk] License verification failed", 0) end\nlocal result = HttpService:JSONDecode(response.Body or "{}")\nif result.ok ~= true or type(result.code) ~= "string" then error("[Jinhyuk] License verification failed", 0) end\nlocal run = loadstring(result.code)\nif not run then error("[Jinhyuk] Script compilation failed", 0) end\nreturn run()\n`;
+  }
+  return `-- Jinhyuk.xyz loader | keyless mode\nlocal HttpService = game:GetService("HttpService")\nlocal response = game:HttpGet("${base}/api/loader/resolve?name=" .. HttpService:UrlEncode(${safeName}))\nlocal result = HttpService:JSONDecode(response)\nif result.ok ~= true or type(result.code) ~= "string" then error("[Jinhyuk] Script unavailable", 0) end\nlocal run = loadstring(result.code)\nif not run then error("[Jinhyuk] Script compilation failed", 0) end\nreturn run()\n`;
+}
+async function scriptRoute(request, env, scriptRaw) {
   const scriptName = cleanSegment(scriptRaw, 64);
-  if (!username || !scriptName) return json(request, { ok: false, error: "invalid_script_path" }, 400);
-  // Browser navigation is discouraged; this is not authentication because headers can be forged.
-  const accept = request.headers.get("Accept") || "";
-  if (accept.includes("text/html") && !accept.includes("application/json")) {
-    return json(request, { ok: false, error: "loader_endpoint_only", message: "이 주소는 로더 전용 엔드포인트입니다." }, 403);
-  }
+  if (!scriptName) return json(request, { ok: false, error: "invalid_script_path" }, 400);
   if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
-  let row;
+  let rows;
   try {
-    row = await env.DB.prepare("SELECT username, script_name, protected_code, status FROM scripts WHERE username_key = ? AND script_key = ? LIMIT 1")
-      .bind(username.toLowerCase(), scriptName.toLowerCase()).first();
-  } catch {
-    return json(request, { ok: false, error: "database_unavailable" }, 503);
+    rows = await env.DB.prepare("SELECT script_name, loader_mode, status FROM scripts WHERE script_key = ? LIMIT 2")
+      .bind(scriptName.toLowerCase()).all();
+  } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+  const matches = rows.results || [];
+  if (matches.length !== 1 || matches[0].status !== "active") return json(request, { ok: false, error: matches.length > 1 ? "script_name_ambiguous" : "script_not_found" }, matches.length > 1 ? 409 : 404);
+  await logRequest(env, scriptName, "loader_requested", request);
+  return text(request, loaderBootstrap(matches[0].script_name, matches[0].loader_mode || "keyless"), 200);
+}
+async function logRequest(env, scriptName, eventType, request) {
+  try {
+    await env.DB.prepare("INSERT INTO loader_events (id, script_name, event_type, country, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)")
+      .bind(crypto.randomUUID(), scriptName, eventType, request.cf?.country || null).run();
+  } catch { /* logging must not break script delivery */ }
+}
+async function resolveLoader(request, env) {
+  if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
+  let parsed = { value: {} };
+  if (request.method === "POST") parsed = await readJson(request, 4096);
+  if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
+  const name = cleanSegment(String(request.method === "GET" ? new URL(request.url).searchParams.get("name") || "" : parsed.value.scriptName || ""), 64);
+  const licenseKey = String(parsed.value.licenseKey || "").trim();
+  if (!name) return json(request, { ok: false, error: "script_name_required" }, 400);
+  let rows;
+  try { rows = await env.DB.prepare("SELECT id, script_name, protected_code, status, loader_mode, product_id FROM scripts WHERE script_key = ? LIMIT 2").bind(name.toLowerCase()).all(); }
+  catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+  const matches = rows.results || [];
+  if (matches.length !== 1) return json(request, { ok: false, error: matches.length > 1 ? "script_name_ambiguous" : "script_not_found" }, matches.length > 1 ? 409 : 404);
+  const script = matches[0];
+  if (script.status !== "active") return json(request, { ok: false, error: "script_disabled" }, 403);
+  if ((script.loader_mode || "keyless") === "key" || script.product_id) {
+    if (!licenseKey) { await logRequest(env, name, "license_missing", request); return json(request, { ok: false, error: "license_required" }, 403); }
+    const keyHash = await sha256Hex(licenseKey);
+    let license;
+    try { license = await env.DB.prepare("SELECT id, status, expires_at FROM licenses WHERE key_hash = ? AND product_id = ? LIMIT 1").bind(keyHash, script.product_id || script.id).first(); }
+    catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+    if (!license || license.status !== "active") { await logRequest(env, name, "license_invalid", request); return json(request, { ok: false, error: "invalid_license" }, 403); }
+    if (license.expires_at && Date.parse(license.expires_at) <= Date.now()) { await logRequest(env, name, "license_expired", request); return json(request, { ok: false, error: "license_expired" }, 403); }
+    try { await env.DB.prepare("UPDATE licenses SET last_verified_at = CURRENT_TIMESTAMP WHERE id = ?").bind(license.id).run(); } catch {}
   }
-  if (!row || row.status !== "active") return json(request, { ok: false, error: "script_not_found" }, 404);
-  return text(request, row.protected_code, 200);
+  await logRequest(env, name, "script_delivered", request);
+  return json(request, { ok: true, scriptName: script.script_name, code: script.protected_code });
 }
 
 export default {
@@ -77,20 +113,22 @@ export default {
       const username = cleanSegment(String(body.username ?? ""), 40);
       const scriptName = cleanSegment(String(body.scriptName ?? ""), 64);
       const code = typeof body.protectedCode === "string" ? body.protectedCode : "";
+      const loaderMode = body.loaderMode === "key" ? "key" : "keyless";
+      const productId = typeof body.productId === "string" && body.productId.trim() ? body.productId.trim().slice(0, 100) : null;
       if (!username || !scriptName || !code.trim()) return json(request, { ok: false, error: "missing_or_invalid_fields" }, 400);
       if (new TextEncoder().encode(code).byteLength > 512 * 1024) return json(request, { ok: false, error: "script_too_large" }, 413);
       // Require output to look like Luau source, not an arbitrary HTML payload.
       if (/<\s*script\b/i.test(code) || /<!doctype\s+html/i.test(code)) return json(request, { ok: false, error: "invalid_script_content" }, 400);
       const id = crypto.randomUUID();
       try {
-        await env.DB.prepare(`INSERT INTO scripts (id, username, username_key, script_name, script_key, protected_code, status, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
-          ON CONFLICT(username_key, script_key) DO UPDATE SET username=excluded.username, script_name=excluded.script_name, protected_code=excluded.protected_code, status='active', updated_at=CURRENT_TIMESTAMP`)
-          .bind(id, username, username.toLowerCase(), scriptName, scriptName.toLowerCase(), code).run();
+        await env.DB.prepare(`INSERT INTO scripts (id, username, username_key, script_name, script_key, protected_code, status, loader_mode, product_id, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(username_key, script_key) DO UPDATE SET username=excluded.username, script_name=excluded.script_name, protected_code=excluded.protected_code, status='active', loader_mode=excluded.loader_mode, product_id=excluded.product_id, updated_at=CURRENT_TIMESTAMP`)
+          .bind(id, username, username.toLowerCase(), scriptName, scriptName.toLowerCase(), code, loaderMode, loaderMode === "key" ? (productId || id) : null).run();
       } catch {
         return json(request, { ok: false, error: "database_unavailable" }, 503);
       }
-      return json(request, { ok: true, username, scriptName, url: `https://jinhyuk.xyz/${encodeURIComponent(username)}/${encodeURIComponent(scriptName)}`, note: "등록 완료. protectedCode에는 보호 처리가 끝난 Luau 코드가 필요합니다." }, 201);
+      return json(request, { ok: true, username, scriptName, loaderMode, productId: productId || id, url: `https://jinhyuk.xyz/api/${encodeURIComponent(scriptName)}`, note: "등록 완료. protectedCode에는 보호 처리가 끝난 Luau 코드가 필요합니다." }, 201);
     }
 
     if (request.method === "GET" && url.pathname === "/api/scripts") {
@@ -115,6 +153,42 @@ export default {
         const result = await env.DB.prepare("UPDATE scripts SET status = 'disabled', updated_at = CURRENT_TIMESTAMP WHERE username_key = ? AND script_key = ?").bind(username.toLowerCase(), scriptName.toLowerCase()).run();
         if (!result.meta?.changes) return json(request, { ok: false, error: "script_not_found" }, 404);
         return json(request, { ok: true, status: "disabled" });
+      } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+    }
+
+    if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/loader/resolve") return resolveLoader(request, env);
+
+    if (request.method === "POST" && url.pathname === "/api/licenses") {
+      if (!authorized(request, env)) return json(request, { ok: false, error: "unauthorized" }, 401);
+      if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
+      const parsed = await readJson(request, 4096);
+      if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
+      const body = parsed.value || {};
+      const productId = String(body.productId || "").trim();
+      const expiresAt = body.expiresAt ? String(body.expiresAt) : null;
+      if (!productId || productId.length > 100) return json(request, { ok: false, error: "product_id_required" }, 400);
+      if (expiresAt && (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now())) return json(request, { ok: false, error: "invalid_expiry" }, 400);
+      const bytes = crypto.getRandomValues(new Uint8Array(24));
+      const key = "JX-" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+      const id = crypto.randomUUID();
+      try {
+        await env.DB.prepare("INSERT INTO licenses (id, product_id, key_hash, status, allowed_place_ids, expires_at) VALUES (?, ?, ?, 'active', '[]', ?)")
+          .bind(id, productId, await sha256Hex(key), expiresAt).run();
+      } catch { return json(request, { ok: false, error: "license_create_failed" }, 503); }
+      return json(request, { ok: true, id, productId, licenseKey: key, expiresAt, warning: "키는 이번 응답에서만 표시됩니다. 안전한 곳에 보관하세요." }, 201);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/licenses/revoke") {
+      if (!authorized(request, env)) return json(request, { ok: false, error: "unauthorized" }, 401);
+      if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
+      const parsed = await readJson(request, 4096);
+      if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
+      const id = String(parsed.value?.id || "").trim();
+      if (!id) return json(request, { ok: false, error: "license_id_required" }, 400);
+      try {
+        const result = await env.DB.prepare("UPDATE licenses SET status = 'revoked' WHERE id = ?").bind(id).run();
+        if (!result.meta?.changes) return json(request, { ok: false, error: "license_not_found" }, 404);
+        return json(request, { ok: true, status: "revoked" });
       } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
     }
 
@@ -143,7 +217,8 @@ export default {
     }
 
     const pathParts = url.pathname.split("/").filter(Boolean);
-    if (request.method === "GET" && pathParts.length === 2) return scriptRoute(request, env, pathParts[0], pathParts[1]);
+    if (request.method === "GET" && pathParts.length === 2 && pathParts[0] === "api") return scriptRoute(request, env, pathParts[1]);
+    if (request.method === "GET" && pathParts.length === 2) return scriptRoute(request, env, pathParts[1]);
     if (request.method === "GET" && env.ASSETS) return env.ASSETS.fetch(request);
     return json(request, { ok: false, error: "not_found" }, 404);
   },
