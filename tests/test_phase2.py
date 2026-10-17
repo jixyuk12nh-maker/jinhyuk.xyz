@@ -107,7 +107,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(run(src), "nil\n")
 
     def test_string_concatenation(self):
-        self.assertEqual(run('print("Lua" .. "Guard")\nprint("v" .. 3)\n'), "LuaGuard\nv3\n")
+        self.assertEqual(run('print("t" .. "m")\nprint("v" .. 3)\n'), "tm\nv3\n")
 
     def test_bytecode_round_trip_is_stable(self):
         data = compile_source("print(1)\n", "t.lua")
