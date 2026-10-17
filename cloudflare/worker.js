@@ -69,7 +69,7 @@ async function resolveLoader(request, env) {
   const licenseKey = String(parsed.value.licenseKey || "").trim();
   if (!name) return json(request, { ok: false, error: "script_name_required" }, 400);
   let rows;
-  try { rows = await env.DB.prepare("SELECT id, script_name, protected_code, status, loader_mode, product_id FROM scripts WHERE script_key = ? LIMIT 2").bind(name.toLowerCase()).all(); }
+  try { rows = await env.DB.prepare("SELECT id, username_key, script_key, script_name, protected_code, status, loader_mode, product_id FROM scripts WHERE script_key = ? LIMIT 2").bind(name.toLowerCase()).all(); }
   catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
   const matches = rows.results || [];
   if (matches.length !== 1) return json(request, { ok: false, error: matches.length > 1 ? "script_name_ambiguous" : "script_not_found" }, matches.length > 1 ? 409 : 404);
@@ -85,8 +85,24 @@ async function resolveLoader(request, env) {
     if (license.expires_at && Date.parse(license.expires_at) <= Date.now()) { await logRequest(env, name, "license_expired", request); return json(request, { ok: false, error: "license_expired" }, 403); }
     try { await env.DB.prepare("UPDATE licenses SET last_verified_at = CURRENT_TIMESTAMP WHERE id = ?").bind(license.id).run(); } catch {}
   }
+  let code = script.protected_code || "";
+  if (env.BUCKET) {
+    const objectKey = `scripts/${script.username_key}/${script.script_key}.lua`;
+    try {
+      const object = await env.BUCKET.get(objectKey);
+      if (object) code = await object.text();
+      else if (!code) {
+        await logRequest(env, name, "script_storage_missing", request);
+        return json(request, { ok: false, error: "script_storage_missing" }, 503);
+      }
+    } catch {
+      await logRequest(env, name, "script_storage_unavailable", request);
+      return json(request, { ok: false, error: "r2_storage_unavailable" }, 503);
+    }
+  }
+  if (!code) return json(request, { ok: false, error: "script_content_empty" }, 503);
   await logRequest(env, name, "script_delivered", request);
-  return json(request, { ok: true, scriptName: script.script_name, code: script.protected_code });
+  return json(request, { ok: true, scriptName: script.script_name, code });
 }
 
 export default {
@@ -95,7 +111,7 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(request) });
 
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
-      return json(request, { ok: true, service: "tm API", version: "1.1.0", database: Boolean(env.DB), scriptLoader: true });
+      return json(request, { ok: true, service: "tm API", version: "1.2.0", database: Boolean(env.DB), r2Storage: Boolean(env.BUCKET), scriptLoader: true });
     }
 
     // TEST MODE: admin endpoints intentionally have no API-token requirement. Do not expose publicly before adding account/session authorization.
@@ -115,15 +131,33 @@ export default {
       // Require output to look like Luau source, not an arbitrary HTML payload.
       if (/<\s*script\b/i.test(code) || /<!doctype\s+html/i.test(code)) return json(request, { ok: false, error: "invalid_script_content" }, 400);
       const id = crypto.randomUUID();
+      const usernameKey = username.toLowerCase();
+      const scriptKey = scriptName.toLowerCase();
+      const objectKey = `scripts/${usernameKey}/${scriptKey}.lua`;
+      let storedInR2 = false;
+      // R2 is the primary file store when the BUCKET binding exists.
+      // Keep D1 protected_code as an empty compatibility value for R2-backed scripts.
+      if (env.BUCKET) {
+        try {
+          await env.BUCKET.put(objectKey, code, {
+            httpMetadata: { contentType: "text/plain; charset=utf-8", cacheControl: "no-store" },
+            customMetadata: { username: usernameKey, scriptName: scriptKey },
+          });
+          storedInR2 = true;
+        } catch {
+          return json(request, { ok: false, error: "r2_storage_unavailable" }, 503);
+        }
+      }
       try {
         await env.DB.prepare(`INSERT INTO scripts (id, username, username_key, script_name, script_key, protected_code, status, loader_mode, product_id, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, CURRENT_TIMESTAMP)
           ON CONFLICT(username_key, script_key) DO UPDATE SET username=excluded.username, script_name=excluded.script_name, protected_code=excluded.protected_code, status='active', loader_mode=excluded.loader_mode, product_id=excluded.product_id, updated_at=CURRENT_TIMESTAMP`)
-          .bind(id, username, username.toLowerCase(), scriptName, scriptName.toLowerCase(), code, loaderMode, loaderMode === "key" ? (productId || id) : null).run();
+          .bind(id, username, usernameKey, scriptName, scriptKey, storedInR2 ? "" : code, loaderMode, loaderMode === "key" ? (productId || id) : null).run();
       } catch {
+        // If D1 registration fails after the R2 write, the object may remain orphaned.
         return json(request, { ok: false, error: "database_unavailable" }, 503);
       }
-      return json(request, { ok: true, username, scriptName, loaderMode, productId: productId || id, url: `https://jinhyuk.xyz/api/${encodeURIComponent(scriptName)}`, note: "등록 완료. protectedCode에는 보호 처리가 끝난 Luau 코드가 필요합니다." }, 201);
+      return json(request, { ok: true, username, scriptName, loaderMode, storage: storedInR2 ? "r2" : "d1_fallback", productId: productId || id, url: `https://jinhyuk.xyz/api/${encodeURIComponent(scriptName)}`, note: storedInR2 ? "등록 완료. 보호된 Luau 코드가 R2에 저장되었습니다." : "등록 완료. R2 바인딩이 없어 D1에 저장되었습니다." }, 201);
     }
 
     if (request.method === "GET" && url.pathname === "/api/scripts") {
