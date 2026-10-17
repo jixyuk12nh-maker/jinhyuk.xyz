@@ -27,11 +27,6 @@ function cleanSegment(value, max = 64) {
   if (!out || out.length > max || out === "." || out === ".." || !/^[A-Za-z0-9_-]+$/.test(out)) return null;
   return out;
 }
-function authorized(request, env) {
-  const expected = String(env.ADMIN_API_TOKEN || "");
-  const supplied = request.headers.get("Authorization") || "";
-  return expected.length >= 24 && supplied.startsWith("Bearer ") && supplied.slice(7) === expected;
-}
 async function readJson(request, maxBytes = 600 * 1024) {
   const raw = await request.text();
   if (new TextEncoder().encode(raw).byteLength > maxBytes) return { error: "request_too_large", status: 413 };
@@ -103,8 +98,8 @@ export default {
       return json(request, { ok: true, service: "tm API", version: "1.1.0", database: Boolean(env.DB), scriptLoader: true });
     }
 
+    // TEST MODE: admin endpoints intentionally have no API-token requirement. Do not expose publicly before adding account/session authorization.
     if (request.method === "POST" && url.pathname === "/api/scripts") {
-      if (!authorized(request, env)) return json(request, { ok: false, error: "unauthorized" }, 401);
       if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
       const parsed = await readJson(request);
       if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
@@ -132,7 +127,6 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/api/scripts") {
-      if (!authorized(request, env)) return json(request, { ok: false, error: "unauthorized" }, 401);
       if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
       const username = cleanSegment(url.searchParams.get("username") || "", 40);
       if (!username) return json(request, { ok: false, error: "username_required" }, 400);
@@ -143,7 +137,6 @@ export default {
     }
 
     if (request.method === "DELETE" && url.pathname.startsWith("/api/scripts/")) {
-      if (!authorized(request, env)) return json(request, { ok: false, error: "unauthorized" }, 401);
       if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
       const parts = url.pathname.split("/").slice(3);
       if (parts.length !== 2) return json(request, { ok: false, error: "invalid_script_path" }, 400);
@@ -159,7 +152,6 @@ export default {
     if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/loader/resolve") return resolveLoader(request, env);
 
     if (request.method === "POST" && url.pathname === "/api/licenses") {
-      if (!authorized(request, env)) return json(request, { ok: false, error: "unauthorized" }, 401);
       if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
       const parsed = await readJson(request, 4096);
       if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
@@ -179,7 +171,6 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/api/licenses/revoke") {
-      if (!authorized(request, env)) return json(request, { ok: false, error: "unauthorized" }, 401);
       if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
       const parsed = await readJson(request, 4096);
       if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
