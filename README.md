@@ -8,7 +8,8 @@ tm is an experimental limited-subset Luau compiler/VM prototype with a Cloudflar
 - `packager.py`: generates a standalone Luau runtime for the currently supported subset.
 - `cli/`: `check`, `run`, and `pack` commands.
 - `public/`: responsive black-glass TM workspace UI served by the Worker assets binding.
-- `cloudflare/worker.js`: Cloudflare Worker API, R2-backed script publishing/delivery, license verification, and static UI fallback.
+- `cloudflare/worker.js`: Cloudflare Worker API, in-Worker JavaScript compilation, R2-backed script publishing/delivery, license verification, and static UI fallback.
+- `cloudflare/compiler.js`: JavaScript port of the restricted parser/code generator/standalone VM packager; this is the test upload pipeline.
 - `cloudflare/schema.sql`: D1 schema; license keys are stored as SHA-256 hashes.
 - `roblox/LicenseGate.server.lua`: example server-side license gate for your own Roblox Studio experience.
 - `package.json` and `wrangler.toml`: Node/Wrangler deployment configuration.
@@ -34,7 +35,7 @@ This initial configuration intentionally does not contain a fake D1 database ID,
 
 ### Add R2
 
-Create an R2 bucket in Cloudflare and add a Worker R2 binding with variable name `BUCKET` pointing to that bucket. In the dashboard, use Worker → Settings → Bindings → Add binding → R2 bucket. The `POST /api/scripts` endpoint stores protected code in R2 at `scripts/<username>/<scriptName>.lua`; D1 stores the script metadata. The loader reads code from R2 after applying the existing active-status and license checks. If the R2 binding is absent, publishing falls back to storing code in D1 for backward compatibility. `GET /health` reports `r2Storage: true` when the binding exists.
+Create an R2 bucket in Cloudflare and add a Worker R2 binding with variable name `BUCKET` pointing to that bucket. In the dashboard, use Worker → Settings → Bindings → Add binding → R2 bucket. The `POST /api/scripts` endpoint accepts the original Lua source as `sourceCode`, compiles/packages it inside the Worker using `cloudflare/compiler.js`, then stores the protected output in R2 at `scripts/<username>/<scriptName>.lua`; D1 stores the script metadata. A compile error returns HTTP 400 and does not write to R2. The loader reads code from R2 after applying the existing active-status and license checks. If the R2 binding is absent, publishing falls back to storing code in D1 for backward compatibility. `GET /health` reports `r2Storage: true` when the binding exists.
 
 ## Run the VM locally
 
@@ -53,12 +54,12 @@ python -m cli pack sample.lua protected.lua 1234
 
 The `public/` directory contains a responsive workspace interface with overview, product, script/VM, user, license, analytics, compiler, API docs, and settings views. The UI deliberately labels sections as unavailable where the corresponding backend API does not exist yet; it does not fabricate product or user data. The health panel calls `https://tm.jixyuk12nh.workers.dev/health`. Update that URL in `public/app.js` if your deployed Worker URL differs.
 
-The site pages are currently a frontend scaffold. Login/signup, product CRUD, user management, license issuance/revocation, analytics, and R2 upload/download are not implemented by this change. The existing license verification API and Roblox loader URL are not changed.
+The site pages are currently a frontend scaffold. The script upload path now compiles and packages the supported Lua subset in the Worker before storage. Login/signup, product CRUD, user management, and analytics are still not implemented by this change.
 
 ## API
 
 - `GET /` or `GET /health`: health/status JSON including whether D1 and R2 bindings exist.
-- `POST /api/scripts`: stores script metadata in D1 and code in R2 when `BUCKET` is bound.
+- `POST /api/scripts`: accepts `{ username, scriptName, sourceCode, loaderMode }`, compiles the original Lua source in JavaScript, and stores the packaged output in D1/R2.
 - `GET /api/loader/resolve`: reads script code from R2 after active-status and license checks.
 - `POST /v1/license/verify`: validates `productId`, `licenseKey`, and `placeId` against the D1 `licenses` table.
 
@@ -66,7 +67,7 @@ The Worker hashes the submitted license key with SHA-256 and compares the hash t
 
 ## Limitations
 
-Cloudflare Workers do not execute Roblox Luau. Roblox server code can call this API using `HttpService` for license verification. The included Python compiler/VM supports only a subset of Luau; varargs, multiple returns, generic `for ... in`, type annotations, metatables, coroutines, most standard libraries, and Roblox APIs are not fully supported. Unit tests do not establish official Luau compatibility or commercial-grade anti-tamper security.
+Cloudflare Workers do not execute Roblox Luau. Roblox server code can call this API using `HttpService` for license verification. The Python CLI remains available for local tests. The Worker uses a JavaScript port of the supported subset; varargs, multiple returns, generic `for ... in`, type annotations, metatables, coroutines, most standard libraries, and Roblox APIs are not fully supported. Unit tests do not establish official Luau compatibility or commercial-grade anti-tamper security.
 
 ## Build hardening (Phase 12)
 
@@ -84,7 +85,7 @@ npx wrangler d1 migrations apply tm-db --remote
 
 For a new database, initialize it with `cloudflare/schema.sql` before deploying. Ensure the D1 binding in `wrangler.toml` points to the intended database. The current test build does not require `ADMIN_API_TOKEN`; the script-publish and license-management endpoints are publicly callable. Do not expose this version as a production service until session-based authorization and owner/developer permissions are added.
 
-Generated keyless loader:
+Generated keyless loader (executor-style environment only; not directly compatible with a default Roblox Studio server/client script):
 
 ```lua
 loadstring(game:HttpGet("https://jinhyuk.xyz/api/MyScript"))()

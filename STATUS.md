@@ -66,3 +66,13 @@ This repository remains an experimental compiler/VM and packaging prototype. It 
 - The UI checks the configured Worker health endpoint and explicitly marks backend features that are not implemented yet.
 - Existing VM/compiler/bytecode source and `/v1/license/verify` behavior are retained.
 - UI presence does not mean account auth, product CRUD, key issuance, analytics, or R2 transfer endpoints exist; these remain follow-up implementation work.
+
+
+## Phase 13 — Worker-side JavaScript compiler pipeline
+
+- Added `cloudflare/compiler.js`, a JavaScript implementation of the project's restricted lexer/parser, register bytecode generator, and standalone Luau VM packager.
+- `POST /api/scripts` now accepts original `sourceCode`, compiles and packages it inside the Worker, and stores only the generated package in R2/D1.
+- Compile failures return HTTP 400 before any R2 write.
+- Updated the script UI to upload original Lua source and report compile/storage status.
+- Worker tests cover successful compilation/storage and rejection without storage on compile failure.
+- Limitations remain: supported syntax is a subset, no Roblox APIs are exposed inside the custom VM, and generated output has not yet been validated in a live Roblox/Luau execution environment.
