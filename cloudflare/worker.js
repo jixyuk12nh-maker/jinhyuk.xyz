@@ -64,6 +64,10 @@ export default {
       return json({ ok: true, productId, placeId, verifiedAt: new Date().toISOString() });
     }
 
+    if (request.method === "GET" && env.ASSETS) {
+      return env.ASSETS.fetch(request);
+    }
+
     return json({ ok: false, error: "not_found" }, 404);
   },
 };
