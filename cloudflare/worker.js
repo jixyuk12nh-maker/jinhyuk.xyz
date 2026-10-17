@@ -13,11 +13,10 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
-      return json({ ok: true, service: "LuaGuard API", version: "1.0.0", database: Boolean(env.DB) });
+      return json({ ok: true, service: "tm API", version: "1.0.0", database: Boolean(env.DB) });
     }
 
     if (request.method === "POST" && url.pathname === "/v1/license/verify") {
-      // Enforce the limit on the actual body, not only Content-Length (which may be absent).
       let rawBody;
       try {
         rawBody = await request.text();
