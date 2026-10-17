@@ -8,7 +8,7 @@ tm is an experimental limited-subset Luau compiler/VM prototype with a Cloudflar
 - `packager.py`: generates a standalone Luau runtime for the currently supported subset.
 - `cli/`: `check`, `run`, and `pack` commands.
 - `public/`: responsive black-glass TM workspace UI served by the Worker assets binding.
-- `cloudflare/worker.js`: Cloudflare Worker API (`GET /`, `GET /health`, `POST /v1/license/verify`) plus static UI fallback.
+- `cloudflare/worker.js`: Cloudflare Worker API, R2-backed script publishing/delivery, license verification, and static UI fallback.
 - `cloudflare/schema.sql`: D1 schema; license keys are stored as SHA-256 hashes.
 - `roblox/LicenseGate.server.lua`: example server-side license gate for your own Roblox Studio experience.
 - `package.json` and `wrangler.toml`: Node/Wrangler deployment configuration.
@@ -34,7 +34,7 @@ This initial configuration intentionally does not contain a fake D1 database ID,
 
 ### Add R2
 
-Create an R2 bucket named `tm-scripts` before enabling the commented `[[r2_buckets]]` binding. The current API does not yet read or write R2 objects; this binding is preparation for the next integration step.
+Create an R2 bucket in Cloudflare and add a Worker R2 binding with variable name `BUCKET` pointing to that bucket. In the dashboard, use Worker → Settings → Bindings → Add binding → R2 bucket. The `POST /api/scripts` endpoint stores protected code in R2 at `scripts/<username>/<scriptName>.lua`; D1 stores the script metadata. The loader reads code from R2 after applying the existing active-status and license checks. If the R2 binding is absent, publishing falls back to storing code in D1 for backward compatibility. `GET /health` reports `r2Storage: true` when the binding exists.
 
 ## Run the VM locally
 
@@ -57,7 +57,9 @@ The site pages are currently a frontend scaffold. Login/signup, product CRUD, us
 
 ## API
 
-- `GET /` or `GET /health`: health/status JSON.
+- `GET /` or `GET /health`: health/status JSON including whether D1 and R2 bindings exist.
+- `POST /api/scripts`: stores script metadata in D1 and code in R2 when `BUCKET` is bound.
+- `GET /api/loader/resolve`: reads script code from R2 after active-status and license checks.
 - `POST /v1/license/verify`: validates `productId`, `licenseKey`, and `placeId` against the D1 `licenses` table.
 
 The Worker hashes the submitted license key with SHA-256 and compares the hash to `key_hash`; raw keys should not be stored in D1. Do not commit secrets or real license keys.
@@ -80,7 +82,7 @@ For an existing D1 database, apply the migration once:
 npx wrangler d1 migrations apply tm-db --remote
 ```
 
-For a new database, initialize it with `cloudflare/schema.sql` before deploying. Ensure the D1 binding in `wrangler.toml` points to the intended database. The current test build does not require `ADMIN_API_TOKEN`; add session-based admin authorization before public production use.
+For a new database, initialize it with `cloudflare/schema.sql` before deploying. Ensure the D1 binding in `wrangler.toml` points to the intended database. The current test build does not require `ADMIN_API_TOKEN`; the script-publish and license-management endpoints are publicly callable. Do not expose this version as a production service until session-based authorization and owner/developer permissions are added.
 
 Generated keyless loader:
 
