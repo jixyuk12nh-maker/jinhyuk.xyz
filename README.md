@@ -1,6 +1,6 @@
-# LuaGuard VM + Cloudflare License API
+# tm VM + Cloudflare License API
 
-LuaGuard is an experimental limited-subset Luau compiler/VM prototype with a Cloudflare Worker license-verification API. It is not a complete Luau implementation and is not production-ready.
+tm is an experimental limited-subset Luau compiler/VM prototype with a Cloudflare Worker license-verification API. It is not a complete Luau implementation and is not production-ready.
 
 ## Repository layout
 
@@ -26,14 +26,14 @@ This initial configuration intentionally does not contain a fake D1 database ID,
 
 ### Add D1
 
-1. Create a D1 database named `luaguard-licenses` in the Cloudflare dashboard.
+1. Create a D1 database named `tm-db` in the Cloudflare dashboard.
 2. Copy its actual database ID.
 3. Uncomment the `[[d1_databases]]` section in `wrangler.toml`, set `database_id`, and commit the change; alternatively configure the `DB` binding in Worker settings.
 4. Apply `cloudflare/schema.sql` to the database using the Cloudflare dashboard or Wrangler.
 
 ### Add R2
 
-Create an R2 bucket named `luaguard-scripts` before enabling the commented `[[r2_buckets]]` binding. The current API does not yet read or write R2 objects; this binding is preparation for the next integration step.
+Create an R2 bucket named `tm-scripts` before enabling the commented `[[r2_buckets]]` binding. The current API does not yet read or write R2 objects; this binding is preparation for the next integration step.
 
 ## Run the VM locally
 

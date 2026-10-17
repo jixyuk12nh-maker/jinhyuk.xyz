@@ -1,3 +1,8 @@
-name = "luaguard-api"
+name = "tm"
 main = "cloudflare/worker.js"
 compatibility_date = "2026-10-16"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tm-db"
+database_id = "9951ea1d-ab4d-44a8-8ba5-9e962092cf82"
