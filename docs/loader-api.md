@@ -28,7 +28,7 @@ Set a strong random token (at least 32 characters) as a Worker secret:
 npx wrangler secret put ADMIN_API_TOKEN
 ```
 
-Do not put this token in source control or embed it into public JavaScript. The dashboard currently asks for it at publish time and sends it only in the request Authorization header. Use a trusted private device and clear the field after publishing.
+Do not put this token in source control or embed it into public JavaScript. Note: the current test build does not yet enforce this token on the endpoints; upload and license-management routes are unauthenticated. Do not expose it publicly until session-based authorization is implemented.
 
 ## Register protected output
 
@@ -42,7 +42,7 @@ Do not put this token in source control or embed it into public JavaScript. The 
 }
 ```
 
-This stores or updates the named record. The response contains the public URL. `GET /api/scripts?username=Jinhyuk` lists metadata for that username (admin token required). `DELETE /api/scripts/Jinhyuk/MyScript` disables the record; it does not physically delete it.
+This stores or updates the named record. When the Worker has an R2 binding named `BUCKET`, the protected code is stored at `scripts/<username-lowercase>/<script-name-lowercase>.lua` in R2 and D1 stores metadata. The response contains the public URL and `storage: "r2"`. Without the binding, it falls back to storing the code in D1 and returns `storage: "d1_fallback"`. `GET /api/scripts?username=Jinhyuk` lists metadata for that username. `DELETE /api/scripts/Jinhyuk/MyScript` disables the record; it does not physically delete the R2 object.
 
 ## Critical runtime limitation
 
