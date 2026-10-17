@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#08090d"><meta name="description" content="TM — script development and protection workspace">
+  <title>TM — Developer Workspace</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#overview" aria-label="TM 홈"><span class="brand-mark">T<span>M</span></span><span class="brand-copy"><b>tm<span>.</span></b><small>DEVELOPER WORKSPACE</small></span></a>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav class="nav" aria-label="주 메뉴">
+        <button class="nav-item active" data-view="overview"><span class="nav-icon">◈</span> 개요</button>
+        <button class="nav-item" data-view="products"><span class="nav-icon">▦</span> 제품 관리</button>
+        <button class="nav-item" data-view="scripts"><span class="nav-icon">⌘</span> 스크립트 / VM</button>
+        <button class="nav-item" data-view="users"><span class="nav-icon">♙</span> 사용자 정보</button>
+        <button class="nav-item" data-view="licenses"><span class="nav-icon">⌑</span> 라이선스</button>
+        <button class="nav-item" data-view="analytics"><span class="nav-icon">▥</span> 통계</button>
+      </nav>
+      <div class="workspace-label tools-label">DEVELOPMENT</div>
+      <nav class="nav" aria-label="개발 메뉴">
+        <button class="nav-item" data-view="compiler"><span class="nav-icon">⟨/⟩</span> 컴파일러</button>
+        <button class="nav-item" data-view="api"><span class="nav-icon">⌘</span> API 문서</button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span> 설정</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="connection"><span class="pulse-dot" id="statusDot"></span><div><b id="connectionText">연결 상태 확인 중</b><small id="connectionSub">Cloudflare Worker</small></div></div><div class="profile"><div class="avatar">TM</div><div class="profile-copy"><b>TM Workspace</b><small>프로젝트 콘솔</small></div><button class="more-button" aria-label="프로필 메뉴">···</button></div></div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar"><button class="mobile-menu" id="mobileMenu" aria-label="메뉴 열기">☰</button><div class="breadcrumbs"><span>TM</span><i>/</i><b id="crumb">개요</b></div><div class="top-actions"><span class="status-pill"><span class="pulse-dot" id="topDot"></span><span id="topStatus">API 확인 중</span></span><a class="icon-button" href="https://github.com/jixyuk12nh-maker/tm" target="_blank" rel="noreferrer" aria-label="GitHub">↗</a></div></header>
+      <div class="content" id="content">
+        <section class="hero-row"><div><div class="eyebrow"><span class="eyebrow-line"></span> YOUR DEVELOPMENT SPACE</div><h1>Build. Protect.<br><span>Ship with TM.</span></h1><p class="hero-description">스크립트 개발과 VM 패키징을 한 곳에서 관리하세요.<br>기존 컴파일러와 런타임을 유지하는 개발자 워크스페이스입니다.</p><div class="hero-actions"><button class="button primary" data-go="compiler">컴파일러 살펴보기 <span>↗</span></button><button class="button secondary" data-go="api">API 문서 보기</button></div></div><div class="hero-art" aria-hidden="true"><div class="orb orb-outer"></div><div class="orb orb-inner"></div><div class="orb-core">TM<span>●</span></div><div class="orbit-label label-top">BYTECODE ENGINE</div><div class="orbit-label label-bottom">BUILD / VERIFY / SHIP</div></div></section>
+        <section class="section-heading"><div><div class="eyebrow">WORKSPACE OVERVIEW</div><h2>프로젝트 현황</h2></div><span class="muted" id="lastUpdated">방금 전</span></section>
+        <div class="stats-grid"><article class="glass stat-card"><div class="stat-top"><span>컴파일 파이프라인</span><span class="stat-icon">⌘</span></div><div class="stat-value">4<span class="stat-unit"> stages</span></div><div class="stat-foot"><span class="tiny-indicator"></span> Frontend → VM package</div></article><article class="glass stat-card"><div class="stat-top"><span>Worker API</span><span class="stat-icon">⌁</span></div><div class="stat-value" id="workerStat">확인 중</div><div class="stat-foot" id="workerFoot">실제 Worker 상태를 확인합니다</div></article><article class="glass stat-card"><div class="stat-top"><span>스토리지</span><span class="stat-icon">▤</span></div><div class="stat-value">준비 필요</div><div class="stat-foot">R2 업로드 API는 별도 구현 필요</div></article><article class="glass stat-card"><div class="stat-top"><span>VM 상태</span><span class="stat-icon">⟨/⟩</span></div><div class="stat-value">Prototype</div><div class="stat-foot">Luau 일부 문법 지원</div></article></div>
+        <section class="lower-grid"><article class="glass panel"><div class="panel-heading"><div><div class="eyebrow">QUICK ACCESS</div><h3>빠른 작업</h3></div><span class="panel-symbol">↗</span></div><div class="quick-list"><button class="quick-item" data-go="products"><span class="quick-icon purple">▦</span><span><b>제품 관리</b><small>프로젝트와 제품 정보를 관리합니다</small></span><span class="quick-arrow">→</span></button><button class="quick-item" data-go="scripts"><span class="quick-icon blue">⌘</span><span><b>스크립트 / VM</b><small>컴파일·패키징 도구 안내</small></span><span class="quick-arrow">→</span></button><button class="quick-item" data-go="api"><span class="quick-icon green">⌁</span><span><b>API 문서</b><small>현재 제공 중인 API 확인</small></span><span class="quick-arrow">→</span></button></div></article><article class="glass panel"><div class="panel-heading"><div><div class="eyebrow">SYSTEM STATUS</div><h3>서비스 상태</h3></div><span class="live-badge"><span class="pulse-dot"></span> LIVE CHECK</span></div><div class="service-row"><div class="service-name"><span class="service-symbol">W</span><div><b>Cloudflare Worker</b><small>API /health</small></div></div><span class="service-state" id="workerState">확인 중</span></div><div class="service-row"><div class="service-name"><span class="service-symbol">D</span><div><b>D1 Database</b><small>라이선스 저장소</small></div></div><span class="service-state" id="dbState">확인 중</span></div><div class="service-row"><div class="service-name"><span class="service-symbol">R</span><div><b>R2 Storage</b><small>스크립트 파일 저장</small></div></div><span class="service-state pending">미연결 확인 필요</span></div><p class="note">상태 표시는 Worker health 응답을 기준으로 합니다. R2는 현재 프로젝트에 업로드·다운로드 로직이 포함되어 있지 않습니다.</p></article></section>
+        <footer class="footer"><span>© 2026 TM Workspace</span><span>Experimental tooling · Not production-ready</span></footer>
+      </div>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body></html>
