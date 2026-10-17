@@ -7,7 +7,8 @@ tm is an experimental limited-subset Luau compiler/VM prototype with a Cloudflar
 - `frontend/`, `compiler/`, `bytecode/`, `vm/`: experimental Python-hosted compiler and VM.
 - `packager.py`: generates a standalone Luau runtime for the currently supported subset.
 - `cli/`: `check`, `run`, and `pack` commands.
-- `cloudflare/worker.js`: Cloudflare Worker API (`GET /`, `GET /health`, `POST /v1/license/verify`).
+- `public/`: responsive black-glass TM workspace UI served by the Worker assets binding.
+- `cloudflare/worker.js`: Cloudflare Worker API (`GET /`, `GET /health`, `POST /v1/license/verify`) plus static UI fallback.
 - `cloudflare/schema.sql`: D1 schema; license keys are stored as SHA-256 hashes.
 - `roblox/LicenseGate.server.lua`: example server-side license gate for your own Roblox Studio experience.
 - `package.json` and `wrangler.toml`: Node/Wrangler deployment configuration.
@@ -47,6 +48,12 @@ python -m cli pack sample.lua protected.lua 1234
 ```
 
 `pack` only supports a subset of Luau. Test generated output in the official Luau CLI or Roblox Studio before relying on it.
+
+## Website UI
+
+The `public/` directory contains a responsive workspace interface with overview, product, script/VM, user, license, analytics, compiler, API docs, and settings views. The UI deliberately labels sections as unavailable where the corresponding backend API does not exist yet; it does not fabricate product or user data. The health panel calls `https://tm.jixyuk12nh.workers.dev/health`. Update that URL in `public/app.js` if your deployed Worker URL differs.
+
+The site pages are currently a frontend scaffold. Login/signup, product CRUD, user management, license issuance/revocation, analytics, and R2 upload/download are not implemented by this change. The existing license verification API and Roblox loader URL are not changed.
 
 ## API
 

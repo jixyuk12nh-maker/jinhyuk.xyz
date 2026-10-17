@@ -57,3 +57,12 @@ This repository remains an experimental compiler/VM and packaging prototype. It 
 - Stored string constants as XOR-masked UTF-8 byte arrays and decode them only when read by the generated runtime.
 - Added regression coverage confirming plaintext string literals are not emitted directly.
 - Security remains obfuscation, not encryption against a determined analyst. The generated Luau still needs real execution tests in the official Luau/Roblox runtime.
+
+
+## Website UI integration
+
+- Added a responsive black-glass workspace UI under `public/` and configured the Worker static assets binding.
+- Added navigation views for overview, products, scripts/VM, users, licenses, analytics, compiler, API docs, and settings.
+- The UI checks the configured Worker health endpoint and explicitly marks backend features that are not implemented yet.
+- Existing VM/compiler/bytecode source and `/v1/license/verify` behavior are retained.
+- UI presence does not mean account auth, product CRUD, key issuance, analytics, or R2 transfer endpoints exist; these remain follow-up implementation work.

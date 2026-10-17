@@ -6,3 +6,8 @@ compatibility_date = "2026-10-16"
 binding = "DB"
 database_name = "tm-db"
 database_id = "9951ea1d-ab4d-44a8-8ba5-9e962092cf82"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"

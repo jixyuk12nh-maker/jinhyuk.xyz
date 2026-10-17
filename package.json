@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "tm Cloudflare Worker license API",
+  "description": "TM workspace UI and Cloudflare Worker API",
   "scripts": {
     "build": "npm run test:worker && wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
