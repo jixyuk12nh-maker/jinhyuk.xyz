@@ -1,3 +1,4 @@
+import { compileAndPack } from "./compiler.js";
 const SITE_ORIGINS = new Set(["https://jinhyuk.xyz", "https://www.jinhyuk.xyz"]);
 const corsHeaders = (request) => {
   const origin = request.headers.get("Origin") || "";
@@ -123,13 +124,20 @@ export default {
       if (!body || typeof body !== "object" || Array.isArray(body)) return json(request, { ok: false, error: "invalid_body" }, 400);
       const username = cleanSegment(String(body.username ?? ""), 40);
       const scriptName = cleanSegment(String(body.scriptName ?? ""), 64);
-      const code = typeof body.protectedCode === "string" ? body.protectedCode : "";
+      const sourceCode = typeof body.sourceCode === "string" ? body.sourceCode : "";
       const loaderMode = body.loaderMode === "key" ? "key" : "keyless";
       const productId = typeof body.productId === "string" && body.productId.trim() ? body.productId.trim().slice(0, 100) : null;
-      if (!username || !scriptName || !code.trim()) return json(request, { ok: false, error: "missing_or_invalid_fields" }, 400);
-      if (new TextEncoder().encode(code).byteLength > 512 * 1024) return json(request, { ok: false, error: "script_too_large" }, 413);
-      // Require output to look like Luau source, not an arbitrary HTML payload.
-      if (/<\s*script\b/i.test(code) || /<!doctype\s+html/i.test(code)) return json(request, { ok: false, error: "invalid_script_content" }, 400);
+      if (!username || !scriptName || !sourceCode.trim()) return json(request, { ok: false, error: "missing_or_invalid_fields" }, 400);
+      if (new TextEncoder().encode(sourceCode).byteLength > 512 * 1024) return json(request, { ok: false, error: "script_too_large" }, 413);
+      // Compile the uploaded source into a standalone custom-VM Luau payload in the Worker.
+      let code;
+      try {
+        code = compileAndPack(sourceCode, `${scriptName}.lua`);
+      } catch (error) {
+        const message = String(error?.message || "compile_failed").slice(0, 500);
+        return json(request, { ok: false, error: "compile_failed", message }, 400);
+      }
+      if (new TextEncoder().encode(code).byteLength > 1024 * 1024) return json(request, { ok: false, error: "compiled_script_too_large" }, 413);
       const id = crypto.randomUUID();
       const usernameKey = username.toLowerCase();
       const scriptKey = scriptName.toLowerCase();
@@ -157,7 +165,7 @@ export default {
         // If D1 registration fails after the R2 write, the object may remain orphaned.
         return json(request, { ok: false, error: "database_unavailable" }, 503);
       }
-      return json(request, { ok: true, username, scriptName, loaderMode, storage: storedInR2 ? "r2" : "d1_fallback", productId: productId || id, url: `https://jinhyuk.xyz/api/${encodeURIComponent(scriptName)}`, note: storedInR2 ? "등록 완료. 보호된 Luau 코드가 R2에 저장되었습니다." : "등록 완료. R2 바인딩이 없어 D1에 저장되었습니다." }, 201);
+      return json(request, { ok: true, username, scriptName, loaderMode, storage: storedInR2 ? "r2" : "d1_fallback", productId: productId || id, url: `https://jinhyuk.xyz/api/${encodeURIComponent(scriptName)}`, protected: true, compiler: "worker-js-lgvm", note: storedInR2 ? "컴파일 및 VM 패키징 완료. 보호된 Luau 코드가 R2에 저장되었습니다." : "컴파일 및 VM 패키징 완료. R2 바인딩이 없어 D1에 저장되었습니다." }, 201);
     }
 
     if (request.method === "GET" && url.pathname === "/api/scripts") {
