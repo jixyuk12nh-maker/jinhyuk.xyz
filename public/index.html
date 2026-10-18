@@ -8,13 +8,14 @@
 <div class="ambient a"></div><div class="ambient b"></div>
 <header class="topbar"><a class="brand" href="/"><span class="brand-mark">T</span><span>TM <small>LUA HOST</small></span></a><span class="status"><i></i> Script hosting</span></header>
 <main class="layout">
-<section class="hero"><div class="eyebrow">SCRIPT PUBLISHING · EDGE DELIVERY</div><h1>스크립트를 저장하고<br><span>URL 하나로 배포하세요.</span></h1><p>Lua 소스를 등록하고 고유 Raw URL을 생성하세요. 소스는 R2에 저장되고 메타데이터는 D1에서 관리됩니다.</p><div class="hero-tags"><span>D1 metadata</span><span>R2 storage</span><span>Raw endpoint</span></div></section>
-<section class="panel create-panel"><div class="panel-head"><div><div class="eyebrow">NEW SCRIPT</div><h2>스크립트 등록</h2></div><span class="lock">PUBLIC HOSTING</span></div>
-<div class="two"><div><label for="name">스크립트 이름</label><input id="name" maxlength="80" placeholder="My Lua Script"></div><div><label for="file">파일 불러오기</label><input id="file" type="file" accept=".lua,.luau,.txt,text/plain"></div></div>
+<section class="hero"><div class="eyebrow">SCRIPT PUBLISHING · EDGE DELIVERY</div><h1>스크립트를 저장하고<br><span>URL 하나로 배포하세요.</span></h1><p>소유자만 스크립트를 등록·수정·삭제할 수 있습니다. URL 이름은 직접 정할 수 있습니다. 예를 들어 /rivals로 등록하면 https://jinhyuk.xyz/rivals 에서 원본 코드가 바로 표시됩니다. 소스는 R2에 저장되고 메타데이터는 D1에서 관리됩니다.</p><div class="hero-tags"><span>D1 metadata</span><span>R2 storage</span><span>Raw endpoint</span></div></section>
+<section class="panel create-panel"><div class="panel-head"><div><div class="eyebrow">NEW SCRIPT</div><h2>스크립트 등록</h2></div><span class="lock">OWNER ONLY</span></div>
+<label for="token">소유자 인증 토큰 <small>Cloudflare Secret의 ADMIN_TOKEN 값</small></label><input id="token" type="password" placeholder="Bearer token 값만 입력" autocomplete="off">
+<div class="two"><div><label for="name">표시 이름</label><input id="name" maxlength="80" placeholder="My Lua Script"></div><div><label for="slug">URL 이름</label><input id="slug" maxlength="60" placeholder="my-script" pattern="[A-Za-z0-9_-]+"><small class="muted">예: https://jinhyuk.xyz/my-script</small></div></div><div><label for="file">파일 불러오기</label><input id="file" type="file" accept=".lua,.luau,.txt,text/plain"></div></div>
 <label for="code">소스 코드</label><textarea id="code" spellcheck="false" placeholder="-- Paste your Lua / Luau source here"></textarea>
 <div class="actions"><span id="size" class="muted">0 bytes</span><button id="publish">스크립트 등록 <span>↗</span></button></div><div id="notice" class="notice" role="status"></div>
 </section>
 <section class="panel list-panel"><div class="panel-head"><div><div class="eyebrow">LIBRARY</div><h2>등록된 스크립트</h2></div><button id="refresh" class="secondary">새로고침 ↻</button></div><div id="scripts" class="scripts"><div class="empty">목록을 불러오는 중...</div></div></section>
-<section class="panel usage"><div class="eyebrow">HOW TO USE</div><h2>Raw URL</h2><p>스크립트 등록 후 생성된 URL을 복사해 필요한 환경에서 사용하세요.</p><pre><code>loadstring(game:HttpGet("https://YOUR-DOMAIN/raw/SCRIPT_ID"))()</code></pre><p class="muted small">이 예제는 해당 실행 환경에서 loadstring 및 HttpGet을 지원해야 작동합니다. 공개 Raw URL은 누구나 읽을 수 있으므로 비밀키나 민감한 정보를 넣지 마세요.</p></section>
+<section class="panel usage"><div class="eyebrow">HOW TO USE</div><h2>Loadstring URL</h2><p>스크립트 등록 후 생성된 URL을 복사해 필요한 환경에서 사용하세요.</p><pre><code>loadstring(game:HttpGet("https://jinhyuk.xyz/my-script"))()</code></pre><p class="muted small">이 예제는 해당 실행 환경에서 loadstring 및 HttpGet을 지원해야 작동합니다. 공개 Loadstring URL은 누구나 읽을 수 있으므로 비밀키나 민감한 정보를 넣지 마세요.</p></section>
 <footer>TM LUA HOST <span>·</span> Cloudflare Workers / D1 / R2</footer>
 </main><script src="/app.js" defer></script></body></html>
