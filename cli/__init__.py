@@ -1,1 +1,1 @@
-"""Command-line interface package."""
+pass

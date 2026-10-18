@@ -1,3 +1,2 @@
-"""Resource limits for compilation input."""
 
 MAX_INPUT_BYTES = 1024 * 1024  

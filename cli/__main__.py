@@ -1,4 +1,3 @@
-"""Command-line entry point: `python3 -m cli check|run <file>`."""
 
 import sys
 import random

@@ -1,4 +1,3 @@
-"""Input validation for the Phase 1 `check` command."""
 
 import os
 
@@ -6,10 +5,6 @@ from cli.limits import MAX_INPUT_BYTES
 from frontend.diagnostics import CompileError, SourceLocation
 
 def load_source(path: str) -> str:
-    """Read a Luau source file, enforcing size and encoding limits.
-
-    Raises CompileError with a location and cause on failure.
-    """
     if not os.path.isfile(path):
         raise CompileError(SourceLocation(path, 1, 1), "파일을 찾을 수 없습니다")
 
