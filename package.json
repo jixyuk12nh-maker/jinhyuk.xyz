@@ -1,0 +1,17 @@
+{
+  "name": "script-hosting-starter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create script-hosting-db",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "check": "node --check src/worker.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

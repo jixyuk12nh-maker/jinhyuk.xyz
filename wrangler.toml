@@ -1,0 +1,18 @@
+name = "script-hosting-starter"
+main = "src/worker.js"
+compatibility_date = "2026-10-13"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/raw/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "script-hosting-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "SCRIPTS"
+bucket_name = "script-hosting-files"
