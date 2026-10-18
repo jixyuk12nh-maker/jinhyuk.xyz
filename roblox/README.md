@@ -1,8 +1,10 @@
-# Roblox integration (legitimate Roblox Studio experiences)
+# Roblox Studio validation
 
-1. Deploy the Cloudflare Worker and configure D1 as described in the root README.
-2. Enable **Allow HTTP Requests** in your own experience's Game Settings > Security.
-3. Put `LicenseGate.server.lua` in `ServerScriptService`. Replace the Worker URL, product ID, and server-side license key.
-4. Add your actual game code as a `ModuleScript` named `GameFeature` in `ServerScriptService`, returning a table with an optional `Init()` function.
+The CI environment can validate Python and Worker code, but it cannot launch Roblox Studio. This manual harness is the boundary for actual Roblox runtime validation.
 
-Important: Roblox `HttpService` can fetch data but does not evaluate arbitrary source text. This example intentionally does not use `loadstring` or executor APIs. Cloudflare verifies a license; the Roblox server runs a ModuleScript already shipped with your experience. Do not put secret keys in replicated/client scripts.
+1. Build a generated standalone package with `python3 -m cli pack sample.lua output.lua` or use the Worker-generated payload.
+2. In a **private test place**, create `ServerStorage/TMGeneratedPayload` as a `ModuleScript` and paste the generated payload into it. It must return the generated runner function.
+3. Add `StudioSmokeTest.server.lua` to `ServerScriptService` and run Play/Test in Roblox Studio.
+4. Save the Output window logs and any errors with the tested payload's hash and Roblox Studio version.
+
+This checks only the payload that was inserted. A passing native-Luau check alone does not establish that the custom VM supports full Luau syntax or Roblox APIs. Do not use a real paid script or production place for this test.
