@@ -25,6 +25,32 @@ test("health endpoint responds without a database", async () => {
   assert.equal(result.body.database, false);
 });
 
+test("beta signup creates a password-hash account and HttpOnly session", async () => {
+  const writes = [];
+  const DB = { prepare(sql) { return { bind(...args) { return { run: async () => { writes.push({ sql, args }); return { meta: { changes: 1 } }; } }; } }; } };
+  const result = await worker.fetch(request("/api/auth/signup", { method: "POST", body: JSON.stringify({ username: "beta-user", email: "beta@example.com", password: "long-enough-password", role: "admin" }) }), { DB });
+  const body = await result.json();
+  assert.equal(result.status, 201);
+  assert.equal(body.account.role, "admin");
+  assert.equal(writes.length, 2);
+  assert.match(writes[0].sql, /INSERT INTO accounts/);
+  assert.notEqual(writes[0].args[4], "long-enough-password");
+  assert.match(result.headers.get("set-cookie"), /HttpOnly/);
+  assert.match(result.headers.get("set-cookie"), /Secure/);
+});
+
+test("account signup fails clearly when D1 is not configured", async () => {
+  const result = await read(await worker.fetch(request("/api/auth/signup", { method: "POST", body: JSON.stringify({ username: "beta-user", email: "beta@example.com", password: "long-enough-password", role: "user" }) }), {}));
+  assert.equal(result.status, 503);
+  assert.equal(result.body.error, "database_not_configured");
+});
+
+test("developer API key issuance requires an account session", async () => {
+  const result = await read(await worker.fetch(request("/api/account/api-token", { method: "POST", body: "{}" }), {}));
+  assert.equal(result.status, 503);
+  assert.equal(result.body.error, "database_not_configured");
+});
+
 test("unknown endpoint returns 404", async () => {
   const result = await read(await worker.fetch(request("/unknown"), {}));
   assert.equal(result.status, 404);
@@ -228,6 +254,7 @@ test("loader resolve rejects a license used outside its configured place allowli
   const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   const DB = { prepare(sql) { return { bind(...args) {
     if (sql.includes("FROM scripts WHERE username_key")) return { all: async () => ({ results: [{ id: "s1", username_key: "u", script_key: "demo", script_name: "Demo", protected_code: "print(1)", status: "active", loader_mode: "key", product_id: "p" }] }) };
+    if (sql.includes("FROM products WHERE product_id")) return { first: async () => ({ status: "active" }) };
     if (sql.includes("FROM licenses WHERE key_hash")) { assert.equal(args[0], hash); return { first: async () => ({ id: "l1", status: "active", allowed_place_ids: '["123"]', expires_at: null }) }; }
     return { run: async () => ({ meta: { changes: 1 } }) };
   } }; } };
