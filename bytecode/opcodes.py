@@ -32,3 +32,8 @@ class Op(IntEnum):
     POW = 29
     IDIV = 30
     LEN = 31
+    NEWLOCAL = 32
+    CALLV = 33
+    RETURNV = 34
+    VARARG = 35
+    APPENDV = 36

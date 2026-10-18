@@ -79,7 +79,7 @@ def _verify_instr(chunk, proto, pc, ins, fail):
             fail(pc, f"upvalue 인덱스 범위 초과 {b}")
     elif op in (Op.ADD, Op.SUB, Op.MUL, Op.DIV, Op.MOD, Op.POW, Op.IDIV, Op.EQ, Op.LT, Op.LE, Op.CONCAT):
         reg(a); reg(b); reg(c)
-    elif op == Op.NEWTABLE:
+    elif op in (Op.NEWTABLE, Op.NEWLOCAL):
         reg(a); unused(b, c)
     elif op == Op.FORCHECK:
         reg(a); reg(b); reg(c)
@@ -102,14 +102,30 @@ def _verify_instr(chunk, proto, pc, ins, fail):
         reg(a); const(b); unused(c)
         if type(proto.constants[b]) is not str:
             fail(pc, "전역 변수 이름은 문자열 상수여야 합니다")
-    elif op == Op.CALL:
-        reg(a); unused(c)
+    elif op in (Op.CALL, Op.CALLV):
+        reg(a)
+        if b < 0 or b >= nregs:
+            fail(pc, f"호출 인수 개수가 범위를 벗어났습니다 ({b})")
         if b > 0:
             reg(a + b)
-    elif op == Op.RETURN:
+        if c < 0 or c > MAX_REGISTERS:
+            fail(pc, "호출 결과 개수가 범위를 벗어났습니다")
+        if c >= 2:
+            reg(a + c - 2)
+    elif op in (Op.RETURN, Op.RETURNV):
+        unused(c)
+        if not 0 <= b <= MAX_REGISTERS:
+            fail(pc, "반환 값 개수가 범위를 벗어났습니다")
+        if b > 0:
+            reg(a); reg(a + b - 1)
+    elif op == Op.VARARG:
         reg(a); unused(c)
-        if b not in (0, 1):
-            fail(pc, "RETURN 인수는 0 또는 1이어야 합니다")
+        if not 0 <= b <= MAX_REGISTERS:
+            fail(pc, "가변 인자 개수가 범위를 벗어났습니다")
+        if b > 0:
+            reg(a + b - 1)
+    elif op == Op.APPENDV:
+        reg(a); reg(b); unused(c)
     elif op == Op.CLOSURE:
         reg(a); unused(c)
         if not 1 <= b < len(chunk.protos):

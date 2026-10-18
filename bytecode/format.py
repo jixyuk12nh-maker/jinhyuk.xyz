@@ -4,7 +4,7 @@ from bytecode.chunk import Chunk, Instr, Proto, UpvalueDesc
 from frontend.diagnostics import BytecodeError
 
 MAGIC = b"LGVM"
-VERSION = 2
+VERSION = 3
 INSTR_FORMAT = "<BHHH"
 INSTR_SIZE = struct.calcsize(INSTR_FORMAT)
 TAG_NIL, TAG_BOOL, TAG_NUMBER, TAG_STRING = 0, 1, 2, 3
@@ -39,7 +39,7 @@ def _pack(out, fmt, *values):
         raise BytecodeError("값이 바이트코드 인코딩 범위를 벗어났습니다") from None
 
 def _encode_proto(out, proto):
-    _pack(out, "<HHH", proto.nparams, proto.nregs, len(proto.upvalues))
+    _pack(out, "<HHHB", proto.nparams, proto.nregs, len(proto.upvalues), int(proto.is_vararg))
     for upvalue in proto.upvalues:
         _pack(out, "<BH", int(upvalue.instack), upvalue.index)
     _pack(out, "<I", len(proto.constants))
@@ -83,7 +83,9 @@ class _Reader:
         return len(self._data) - self._pos
 
 def _decode_proto(reader):
-    nparams, nregs, nupvalues = reader.unpack("<HHH")
+    nparams, nregs, nupvalues, vararg = reader.unpack("<HHHB")
+    if vararg not in (0, 1):
+        raise BytecodeError("잘못된 가변 인자 플래그입니다")
     if nupvalues > reader.remaining() // 3:
         raise BytecodeError("upvalue 개수가 데이터 크기와 맞지 않습니다")
     upvalues = []
@@ -100,7 +102,7 @@ def _decode_proto(reader):
     if ncode * INSTR_SIZE > reader.remaining():
         raise BytecodeError("명령어 개수가 데이터 크기와 맞지 않습니다")
     code = [Instr(*reader.unpack(INSTR_FORMAT)) for _ in range(ncode)]
-    return Proto(nparams=nparams, nregs=nregs, constants=constants, code=code, upvalues=upvalues)
+    return Proto(nparams=nparams, nregs=nregs, constants=constants, code=code, upvalues=upvalues, is_vararg=bool(vararg))
 
 def _decode_constant(reader):
     (tag,) = reader.unpack("<B")

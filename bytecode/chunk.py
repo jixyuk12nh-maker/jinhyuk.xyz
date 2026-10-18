@@ -19,6 +19,7 @@ class Proto:
     constants: list
     code: list
     upvalues: list = None
+    is_vararg: bool = False
 
     def __post_init__(self):
         if self.upvalues is None:
