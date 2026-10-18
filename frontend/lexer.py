@@ -15,7 +15,12 @@ SYMBOLS = (
     "(", ")", "{", "}", "[", "]", ";", ":", ",", ".",
 )
 
-ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'", "0": "\0"}
+SIMPLE_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+    "\\": "\\", '"': '"', "'": "'", "\n": "\n",
+}
+
+HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 @dataclass(frozen=True)
 class Token:
@@ -52,20 +57,28 @@ def _bracket_level(source, i):
         return j - i - 1
     return None
 
+def _read_long_bracket(source, i, loc, what):
+    level = _bracket_level(source, i)
+    closer = "]" + "=" * level + "]"
+    start = i + level + 2
+    if source.startswith("\r\n", start):
+        start += 2
+    elif source.startswith("\n", start):
+        start += 1
+    end = source.find(closer, start)
+    if end < 0:
+        raise CompileError(loc.at(i), f"{what}이(가) 닫히지 않았습니다")
+    return end + len(closer), source[start:end]
+
 def _skip_trivia(source, i, loc):
     n = len(source)
     while i < n:
         ch = source[i]
-        if ch in " \t\r\n":
+        if ch in " \t\r\n\f\v":
             i += 1
         elif source.startswith("--", i):
-            level = _bracket_level(source, i + 2)
-            if level is not None:
-                closer = "]" + "=" * level + "]"
-                end = source.find(closer, i + 4 + level)
-                if end < 0:
-                    raise CompileError(loc.at(i), "블록 주석이 닫히지 않았습니다")
-                i = end + len(closer)
+            if _bracket_level(source, i + 2) is not None:
+                i, _ = _read_long_bracket(source, i + 2, loc, "블록 주석")
             else:
                 end = source.find("\n", i)
                 i = n if end < 0 else end
@@ -76,7 +89,13 @@ def _skip_trivia(source, i, loc):
 def _read_number(source, i, loc):
     n = len(source)
     if source.startswith(("0x", "0X"), i):
-        raise CompileError(loc.at(i), "16진수 리터럴은 아직 지원하지 않습니다")
+        j = i + 2
+        k = j
+        while k < n and source[k] in HEX_DIGITS:
+            k += 1
+        if k == j or (k < n and _is_ident_char(source[k])):
+            raise CompileError(loc.at(i), "잘못된 16진수 리터럴입니다")
+        return k, float(int(source[j:k], 16))
     j = i
     while j < n and _is_digit(source[j]):
         j += 1
@@ -109,17 +128,37 @@ def _read_string(source, i, loc):
         ch = source[j]
         if ch == quote:
             return j + 1, "".join(parts)
-        if ch == "\\":
-            if j + 1 >= n:
-                raise CompileError(loc.at(i), "문자열이 닫히지 않았습니다")
-            esc = source[j + 1]
-            if esc not in ESCAPES:
-                raise CompileError(loc.at(j), f"지원하지 않는 이스케이프 문자 '\\{esc}'")
-            parts.append(ESCAPES[esc])
-            j += 2
-        else:
+        if ch != "\\":
             parts.append(ch)
             j += 1
+            continue
+        if j + 1 >= n:
+            raise CompileError(loc.at(i), "문자열이 닫히지 않았습니다")
+        esc = source[j + 1]
+        if esc in SIMPLE_ESCAPES:
+            parts.append(SIMPLE_ESCAPES[esc])
+            j += 2
+        elif _is_digit(esc):
+            k = j + 1
+            while k < n and k - (j + 1) < 3 and _is_digit(source[k]):
+                k += 1
+            value = int(source[j + 1:k])
+            if value > 255:
+                raise CompileError(loc.at(j), "이스케이프 값은 255 이하여야 합니다")
+            parts.append(chr(value))
+            j = k
+        elif esc == "x":
+            digits = source[j + 2:j + 4]
+            if len(digits) != 2 or any(c not in HEX_DIGITS for c in digits):
+                raise CompileError(loc.at(j), "\\x 뒤에는 16진수 두 자리가 필요합니다")
+            parts.append(chr(int(digits, 16)))
+            j += 4
+        elif esc == "z":
+            j += 2
+            while j < n and source[j] in " \t\r\n\f\v":
+                j += 1
+        else:
+            raise CompileError(loc.at(j), f"지원하지 않는 이스케이프 문자 '\\{esc}'")
 
 def tokenize(source, file):
     loc = _Locator(source, file)
@@ -146,6 +185,10 @@ def tokenize(source, file):
             i = j
         elif ch in "\"'":
             j, value = _read_string(source, i, loc)
+            tokens.append(Token("STRING", value, loc.at(i)))
+            i = j
+        elif ch == "[" and _bracket_level(source, i) is not None:
+            j, value = _read_long_bracket(source, i, loc, "긴 문자열")
             tokens.append(Token("STRING", value, loc.at(i)))
             i = j
         else:
