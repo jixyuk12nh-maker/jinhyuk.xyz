@@ -52,13 +52,18 @@ python -m cli pack sample.lua protected.lua 1234
 
 ## Website UI
 
-The `public/` directory contains a responsive workspace interface with overview, product, script/VM, user, license, analytics, compiler, API docs, and settings views. The UI deliberately labels sections as unavailable where the corresponding backend API does not exist yet; it does not fabricate product or user data. The health panel calls `https://tm.jixyuk12nh.workers.dev/health`. Update that URL in `public/app.js` if your deployed Worker URL differs.
-
-The site remains a prototype rather than a full commercial dashboard. Script upload and license management require a developer bearer token. Admin-only developer provisioning uses the authenticated developer API token of an account whose D1 role is `admin`. No separate admin-token environment variable is used.
+The `public/` directory contains the workspace interface, email/password signup and login, session status, developer API key issuance, product listing/status/name management, admin user listing/blocking, license management, analytics, compiler, API docs, and settings. The site remains a beta prototype; not every commercial feature is implemented. The health panel uses the current origin's `/health` endpoint.
 
 ## API
 
 - `GET /` or `GET /health`: service status and binding presence.
+- `POST /api/auth/signup`: creates an email/password account; body `{ "username", "email", "password", "role": "user" | "admin" }`; creates an HttpOnly session cookie.
+- `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`: session-based account authentication.
+- `POST /api/account/api-token`: requires a signed-in account; issues or rotates its developer API key, shown once. The key's hash is stored in D1.
+- `GET /api/account/admin/users`: admin-session-only user list.
+- `POST /api/account/admin/users/:id/status`: admin-session-only account block/unblock; disabling an account also disables its linked developer key and removes sessions.
+- `GET /api/products`, `PATCH /api/products/:productId`: developer-token-scoped product list, name and status update.
+- `GET /api/analytics`: developer-token-scoped script, product, license, and loader-event counts.
 - `POST /api/admin/developers`: admin-only; body `{ "username": "devname" }`; returns a developer API token once.
 - `GET /api/admin/developers`: admin-only developer listing.
 - `POST /api/admin/developers/:id/status`: admin-only; body `{ "status": "active" }` or `{ "status": "disabled" }`.
@@ -87,10 +92,10 @@ The Worker supports `/api/<scriptName>` loader bootstrap URLs with `keyless` and
 1. Use an existing developer account's API token for authenticated management.
 2. Grant the trusted account the `admin` role directly in D1 after verifying its identity: `UPDATE developers SET role = 'admin' WHERE username_key = 'your_verified_username';`
 3. Use that account's existing developer API token in the `Authorization: Bearer <developer-token>` header. The token is stored only as a SHA-256 hash in D1. Do not expose it in public frontend code.
-4. For an existing database, apply `cloudflare/migrations/0003_developer_auth.sql` after earlier migrations are applied. For a new database, execute `cloudflare/schema.sql` once as the baseline schema. Do not re-run the baseline schema over a database that already has the `developer_id` column.
+4. For an existing database whose earlier migrations are recorded, apply `cloudflare/migrations/0004_accounts_sessions.sql` using `wrangler d1 migrations apply tm-db --remote`. If you initialized the database manually from `cloudflare/schema.sql` and the migration history is not tracked, run the contents of `0004_accounts_sessions.sql` once in the D1 SQL editor instead. Do not run it twice: it adds `developers.account_id`.
 5. Legacy scripts created before developer ownership have `developer_id = NULL`; assign them to a verified developer before expecting developer-scoped management routes to list or modify them.
 
-In key mode, the loader submits the license key to `/api/loader/resolve`; the Worker checks key hash, status, expiry, and configured Place ID allowlist. A client-supplied Place ID can be spoofed, so this is not cryptographic proof of game identity. This is bearer-token authentication with owner scoping, not a full browser-session/CSRF system. Test separate developer accounts before public use.
+In key mode, the loader submits the license key to `/api/loader/resolve`; the Worker checks key hash, status, expiry, and configured Place ID allowlist. A client-supplied Place ID can be spoofed, so this is not cryptographic proof of game identity. Browser accounts now use password-derived hashes and seven-day HttpOnly session cookies. Developer API keys remain separate bearer credentials, are stored only as SHA-256 hashes, and are shown once when issued. This is still a beta system: there is no email verification, password reset, rate limiting, or full audit log. The requested beta signup currently lets anyone select `admin`; this is unsafe on a public deployment and must be restricted before launch.
 
 Generated keyless loader (executor-style environment only; not directly compatible with a default Roblox Studio server/client script):
 

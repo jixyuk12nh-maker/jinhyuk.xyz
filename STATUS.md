@@ -65,7 +65,7 @@ This repository remains an experimental compiler/VM and packaging prototype. It 
 - Added navigation views for overview, products, scripts/VM, users, licenses, analytics, compiler, API docs, and settings.
 - The UI checks the configured Worker health endpoint and explicitly marks backend features that are not implemented yet.
 - Existing VM/compiler/bytecode source and `/v1/license/verify` behavior are retained.
-- UI presence does not mean account auth, product CRUD, key issuance, analytics, or R2 transfer endpoints exist; these remain follow-up implementation work.
+- Beta follow-up added account auth, developer key issuance, product listing/status/name updates, admin user listing/blocking, and developer-scoped analytics; see the current sections below.
 
 
 ## Phase 13 — Worker-side JavaScript compiler pipeline
@@ -91,14 +91,19 @@ This repository remains an experimental compiler/VM and packaging prototype. It 
 - Script publishing, listing, disabling, license creation, and license revocation require an active developer token. Script owner identity comes from the token; product and license operations are scoped to the developer's owned products. Product ID and legacy script ownership collision checks were added.
 - Dashboard script/license forms now request the developer token and keep it in `sessionStorage` for the current browser tab only.
 - Added an official Luau CLI conformance smoke corpus and GitHub Actions job that builds upstream `luau-lang/luau`; added a manual Roblox Studio payload smoke harness.
-- Local validation: 75 Python unit tests pass; 20 Worker tests pass; JavaScript syntax checks pass.
+- Local validation after beta account/product/analytics additions: 75 Python unit tests pass; 22 Worker tests pass; Worker and UI JavaScript syntax checks pass; baseline schema plus migration 0004 applies in SQLite.
 
 ### Remaining blockers / truth-in-advertising
 
 - The project's actual JS/Python compiler and embedded VM remain a restricted subset. The official CLI CI job checks the official Luau corpus separately; it does not magically add full syntax/runtime support to the custom VM.
 - The Roblox Studio harness is provided but has not been executed in this environment. A user must run it in a private Studio test place and record the result.
 - Luarmor private implementation is unavailable. The project can implement equivalent public-facing features, not claim a byte-for-byte or algorithm-for-algorithm reproduction.
-- Developer authentication is bearer-token based, not full password/session auth. Existing scripts with `developer_id = NULL` need an explicit owner migration.
+- Added `cloudflare/migrations/0004_accounts_sessions.sql` with accounts, sessions, and the developer-account link.
+- Added email/password signup and login with PBKDF2-SHA-256 password hashes, seven-day HttpOnly session cookies, logout, and current-session lookup.
+- Beta signup lets a user choose `user` or `admin`. This is intentionally test-only and unsafe for public registration; restrict admin assignment before launch.
+- Added self-service developer API key issue/rotation; only the key hash is stored and the raw key is shown once. The key is kept in the browser tab session storage when issued from the UI.
+- Added admin user listing/blocking, developer-owned product listing/name/status updates, and developer-scoped summary analytics.
+- Existing scripts with `developer_id = NULL` still need an explicit owner migration. Email verification, password reset, rate limiting, and production-grade account recovery remain unimplemented.
 - Wrangler deployment dry-run and upstream Luau CI build were not run locally in this environment.
 
 
