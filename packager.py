@@ -134,7 +134,7 @@ def generate_luau(bytecode: bytes, seed: int | None = None) -> str:
     emit('SETGLOBAL', 'ENV[constant(p,b)]=regs[a+1].value')
     emit('GETUPVAL', 'if not fn.upvalues[b+1] then error("bad upvalue",0) end; regs[a+1].value=fn.upvalues[b+1].value')
     emit('SETUPVAL', 'if not fn.upvalues[b+1] then error("bad upvalue",0) end; fn.upvalues[b+1].value=regs[a+1].value')
-    emit('CALL', 'local args2={n=b}; for i=1,b do args2[i]=regs[a+i].value end; regs[a+1].value=call(regs[a+1].value,args2)')
+    emit('CALL', 'local args2={n=b}; for i=1,b do args2[i]=regs[a+i+1].value end; regs[a+1].value=call(regs[a+1].value,args2)')
     emit('CLOSURE', 'local child=PROTOS[b+1]; local ups={}; for i,d in ipairs(child.upvalues) do ups[i]=d.s and regs[d.i+1] or fn.upvalues[d.i+1]; if not ups[i] then error("bad closure upvalue",0) end end; regs[a+1].value={__closure=true,proto=child,upvalues=ups}')
     emit('FORCHECK', 'local x,limit,step=regs[b+1].value,regs[c+1].value,regs[b+3].value; if type(x)~="number" or type(limit)~="number" or type(step)~="number" then error("numeric for expects numbers",0) end; regs[a+1].value=(step>=0 and x<=limit or step<0 and x>=limit)')
     emit('FORSTEP', 'local x,step=regs[a+1].value,regs[a+3].value; regs[a+1].value=x+step')

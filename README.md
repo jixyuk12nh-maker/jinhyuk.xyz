@@ -54,48 +54,55 @@ python -m cli pack sample.lua protected.lua 1234
 
 The `public/` directory contains a responsive workspace interface with overview, product, script/VM, user, license, analytics, compiler, API docs, and settings views. The UI deliberately labels sections as unavailable where the corresponding backend API does not exist yet; it does not fabricate product or user data. The health panel calls `https://tm.jixyuk12nh.workers.dev/health`. Update that URL in `public/app.js` if your deployed Worker URL differs.
 
-The site pages are currently a frontend scaffold. The script upload path now compiles and packages the supported Lua subset in the Worker before storage. Login/signup, product CRUD, user management, and analytics are still not implemented by this change.
+The site remains a prototype rather than a full commercial dashboard. Script upload and license management require a developer bearer token. Admin-only developer provisioning uses the authenticated developer API token of an account whose D1 role is `admin`. No separate admin-token environment variable is used.
 
 ## API
 
-- `GET /` or `GET /health`: health/status JSON including whether D1 and R2 bindings exist.
-- `POST /api/scripts`: accepts `{ username, scriptName, sourceCode, loaderMode }`, compiles the original Lua source in JavaScript, and stores the packaged output in D1/R2.
-- `GET /api/loader/resolve`: reads script code from R2 after active-status and license checks.
-- `POST /v1/license/verify`: validates `productId`, `licenseKey`, and `placeId` against the D1 `licenses` table.
+- `GET /` or `GET /health`: service status and binding presence.
+- `POST /api/admin/developers`: admin-only; body `{ "username": "devname" }`; returns a developer API token once.
+- `GET /api/admin/developers`: admin-only developer listing.
+- `POST /api/admin/developers/:id/status`: admin-only; body `{ "status": "active" }` or `{ "status": "disabled" }`.
+- `POST /api/admin/developers/:id/rotate-token`: admin-only; revokes the previous developer token and returns a new token once.
+- `POST /api/scripts`: requires `Authorization: Bearer <developer-token>`; accepts `{ scriptName, sourceCode, loaderMode }`. Identity comes from the token, not request JSON.
+- `GET /api/scripts`: requires a developer token and returns only that developer's scripts.
+- `DELETE /api/scripts/:username/:scriptName`: requires a developer token and matching owner.
+- `POST /api/licenses` and `POST /api/licenses/revoke`: require a developer token and product ownership.
+- `GET /api/loader/resolve` and `POST /api/loader/resolve`: loader delivery with license checks.
+- `POST /v1/license/verify`: public key verification; client-supplied Place ID is not a trusted identity.
 
-The Worker hashes the submitted license key with SHA-256 and compares the hash to `key_hash`; raw keys should not be stored in D1. Do not commit secrets or real license keys.
+The Worker hashes developer API tokens and license keys before storage. Do not commit secrets or real license keys.
 
 ## Limitations
 
-Cloudflare Workers do not execute Roblox Luau. Roblox server code can call this API using `HttpService` for license verification. The Python CLI remains available for local tests. The Worker uses a JavaScript port of the supported subset; varargs, multiple returns, generic `for ... in`, type annotations, metatables, coroutines, most standard libraries, and Roblox APIs are not fully supported. Unit tests do not establish official Luau compatibility or commercial-grade anti-tamper security.
+The Worker does not provide Roblox's `game`, `Instance`, services, or full Roblox runtime. Its JavaScript compiler remains a restricted subset and is not a full Luau parser/runtime. CI now builds the upstream official Luau CLI and runs a conformance smoke corpus; `roblox/StudioSmokeTest.server.lua` is a manual Studio harness. Neither proves that the custom VM supports all Luau syntax. Full language support requires migrating the actual compiler/runtime pipeline to the official Luau compiler and VM (or a demonstrably equivalent implementation) and validating the generated runtime.
 
 ## Build hardening (Phase 12)
 
 Generated builds use build-specific opcode permutation and affine opcode encoding, instruction-position-dependent operand masking, and XOR-masked UTF-8 string constants. These mechanisms increase the effort needed for quick static inspection but are reversible and are not cryptographic protection.
 
-## Jinhyuk.xyz loader modes (2026-10-18 update)
+## Developer/admin authentication and loader modes (2026-10-18 update)
 
-The Worker supports `/api/<scriptName>` loader bootstrap URLs with `keyless` and `key` modes. In this test build, script upload and license-management endpoints do not require an admin API token. This is intentionally insecure and must not be exposed publicly before session-based admin authorization is added. In key mode, the generated loader reads the global `Script_key` value and submits it to `/api/loader/resolve`; the Worker checks the stored license hash, status, and expiration before returning code. Create licenses with `POST /api/licenses` and the `productId` returned by script registration. The raw key is shown only in the creation response.
+The Worker supports `/api/<scriptName>` loader bootstrap URLs with `keyless` and `key` modes. Management APIs fail closed:
 
-For an existing D1 database, apply the migration once:
+1. Use an existing developer account's API token for authenticated management.
+2. Grant the trusted account the `admin` role directly in D1 after verifying its identity: `UPDATE developers SET role = 'admin' WHERE username_key = 'your_verified_username';`
+3. Use that account's existing developer API token in the `Authorization: Bearer <developer-token>` header. The token is stored only as a SHA-256 hash in D1. Do not expose it in public frontend code.
+4. For an existing database, apply `cloudflare/migrations/0003_developer_auth.sql` after earlier migrations are applied. For a new database, execute `cloudflare/schema.sql` once as the baseline schema. Do not re-run the baseline schema over a database that already has the `developer_id` column.
+5. Legacy scripts created before developer ownership have `developer_id = NULL`; assign them to a verified developer before expecting developer-scoped management routes to list or modify them.
 
-```sh
-npx wrangler d1 migrations apply tm-db --remote
-```
-
-For a new database, initialize it with `cloudflare/schema.sql` before deploying. Ensure the D1 binding in `wrangler.toml` points to the intended database. The current test build does not require `ADMIN_API_TOKEN`; the script-publish and license-management endpoints are publicly callable. Do not expose this version as a production service until session-based authorization and owner/developer permissions are added.
+In key mode, the loader submits the license key to `/api/loader/resolve`; the Worker checks key hash, status, expiry, and configured Place ID allowlist. A client-supplied Place ID can be spoofed, so this is not cryptographic proof of game identity. This is bearer-token authentication with owner scoping, not a full browser-session/CSRF system. Test separate developer accounts before public use.
 
 Generated keyless loader (executor-style environment only; not directly compatible with a default Roblox Studio server/client script):
 
 ```lua
-loadstring(game:HttpGet("https://jinhyuk.xyz/api/MyScript"))()
+loadstring(game:HttpGet("https://jinhyuk.xyz/api/YOUR_USERNAME/MyScript"))()
 ```
 
 Generated key loader:
 
 ```lua
 Script_key = "YOUR_LICENSE_KEY"
-loadstring(game:HttpGet("https://jinhyuk.xyz/api/MyScript"))()
+loadstring(game:HttpGet("https://jinhyuk.xyz/api/YOUR_USERNAME/MyScript"))()
 ```
 
 Note: a client-side loader cannot guarantee prevention of source dumping after code reaches the client. The Worker logs loader requests and enforces license checks for key-mode delivery, but this is not a complete anti-dump system or production-grade rate limiter.

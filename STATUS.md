@@ -76,3 +76,35 @@ This repository remains an experimental compiler/VM and packaging prototype. It 
 - Updated the script UI to upload original Lua source and report compile/storage status.
 - Worker tests cover successful compilation/storage and rejection without storage on compile failure.
 - Limitations remain: supported syntax is a subset, no Roblox APIs are exposed inside the custom VM, and generated output has not yet been validated in a live Roblox/Luau execution environment.
+
+## Phase 14 — official Luau and public Luarmor documentation review
+
+- Added `docs/luau-conformance.md`, separating official Luau language/runtime expectations from this project's implemented subset.
+- Added regression tests that unsupported syntax (generic iteration, varargs, `do` blocks, Luau `if` expressions, `continue`, type annotations, and backtick interpolation) is rejected rather than accidentally treated as supported.
+- Compared only against public Luarmor documentation; no claim is made about private Luarmor internals.
+- Full Luau/Roblox compatibility remains unverified because the official Luau CLI/Roblox runtime is not available in this environment.
+
+## Phase 15 — developer API authentication and external conformance harness (2026-10-18)
+
+- Added `cloudflare/migrations/0003_developer_auth.sql`: developers, products, script ownership, and indexes.
+- Admin endpoints under `/api/admin/developers` require a valid developer API token and a D1 `admin` role. Developer creation returns a high-entropy bearer token once and stores only its SHA-256 hash.
+- Script publishing, listing, disabling, license creation, and license revocation require an active developer token. Script owner identity comes from the token; product and license operations are scoped to the developer's owned products. Product ID and legacy script ownership collision checks were added.
+- Dashboard script/license forms now request the developer token and keep it in `sessionStorage` for the current browser tab only.
+- Added an official Luau CLI conformance smoke corpus and GitHub Actions job that builds upstream `luau-lang/luau`; added a manual Roblox Studio payload smoke harness.
+- Local validation: 75 Python unit tests pass; 20 Worker tests pass; JavaScript syntax checks pass.
+
+### Remaining blockers / truth-in-advertising
+
+- The project's actual JS/Python compiler and embedded VM remain a restricted subset. The official CLI CI job checks the official Luau corpus separately; it does not magically add full syntax/runtime support to the custom VM.
+- The Roblox Studio harness is provided but has not been executed in this environment. A user must run it in a private Studio test place and record the result.
+- Luarmor private implementation is unavailable. The project can implement equivalent public-facing features, not claim a byte-for-byte or algorithm-for-algorithm reproduction.
+- Developer authentication is bearer-token based, not full password/session auth. Existing scripts with `developer_id = NULL` need an explicit owner migration.
+- Wrangler deployment dry-run and upstream Luau CI build were not run locally in this environment.
+
+
+## Follow-up cleanup
+
+- Removed source-code comments from JavaScript, Python, Lua, SQL, CSS, HTML, TOML, and workflow files.
+- Removed the separate `ADMIN_API_TOKEN` environment-secret requirement. Admin routes now require a valid developer API token whose D1 account has the `admin` role.
+- Added no cache layer or Cache API usage. `no-store` headers remain only to prevent caching of sensitive responses and stored script payloads.
+- Re-ran Python and Worker tests after the cleanup.
