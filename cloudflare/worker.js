@@ -4,7 +4,7 @@ const corsHeaders = (request) => {
   const origin = request.headers.get("Origin") || "";
   return {
     ...(SITE_ORIGINS.has(origin) ? { "access-control-allow-origin": origin, "vary": "Origin" } : {}),
-    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+    "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
     "access-control-allow-headers": "Content-Type, Authorization",
     "access-control-max-age": "86400",
   };
@@ -105,18 +105,18 @@ async function scriptRoute(request, env, scriptRaw, usernameRaw = null) {
   let rows;
   try {
     rows = username
-      ? await env.DB.prepare("SELECT username, username_key, script_name, loader_mode, status FROM scripts WHERE username_key = ? AND script_key = ? LIMIT 2").bind(username.toLowerCase(), scriptName.toLowerCase()).all()
-      : await env.DB.prepare("SELECT username, username_key, script_name, loader_mode, status FROM scripts WHERE script_key = ? LIMIT 2").bind(scriptName.toLowerCase()).all();
+      ? await env.DB.prepare("SELECT developer_id, username, username_key, script_name, loader_mode, status FROM scripts WHERE username_key = ? AND script_key = ? LIMIT 2").bind(username.toLowerCase(), scriptName.toLowerCase()).all()
+      : await env.DB.prepare("SELECT developer_id, username, username_key, script_name, loader_mode, status FROM scripts WHERE script_key = ? LIMIT 2").bind(scriptName.toLowerCase()).all();
   } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
   const matches = rows.results || [];
   if (matches.length !== 1 || matches[0].status !== "active") return json(request, { ok: false, error: matches.length > 1 ? "script_name_ambiguous" : "script_not_found" }, matches.length > 1 ? 409 : 404);
-  await logRequest(env, scriptName, "loader_requested", request);
+  await logRequest(env, matches[0].developer_id, scriptName, "loader_requested", request);
   return text(request, loaderBootstrap(matches[0].username_key || matches[0].username, matches[0].script_name, matches[0].loader_mode || "keyless"), 200);
 }
-async function logRequest(env, scriptName, eventType, request) {
+async function logRequest(env, developerId, scriptName, eventType, request) {
   try {
-    await env.DB.prepare("INSERT INTO loader_events (id, script_name, event_type, country, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)")
-      .bind(crypto.randomUUID(), scriptName, eventType, request.cf?.country || null).run();
+    await env.DB.prepare("INSERT INTO loader_events (id, developer_id, script_name, event_type, country, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
+      .bind(crypto.randomUUID(), developerId || null, scriptName, eventType, request.cf?.country || null).run();
   } catch {  }
 }
 async function resolveLoader(request, env) {
@@ -131,7 +131,7 @@ async function resolveLoader(request, env) {
   if (!name) return json(request, { ok: false, error: "script_name_required" }, 400);
   if (!username) return json(request, { ok: false, error: "script_username_required" }, 400);
   let rows;
-  try { rows = await env.DB.prepare("SELECT id, username_key, script_key, script_name, protected_code, status, loader_mode, product_id FROM scripts WHERE username_key = ? AND script_key = ? LIMIT 2").bind(username.toLowerCase(), name.toLowerCase()).all(); }
+  try { rows = await env.DB.prepare("SELECT id, developer_id, username_key, script_key, script_name, protected_code, status, loader_mode, product_id FROM scripts WHERE username_key = ? AND script_key = ? LIMIT 2").bind(username.toLowerCase(), name.toLowerCase()).all(); }
   catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
   const matches = rows.results || [];
   if (matches.length !== 1) return json(request, { ok: false, error: matches.length > 1 ? "script_name_ambiguous" : "script_not_found" }, matches.length > 1 ? 409 : 404);
@@ -144,24 +144,24 @@ async function resolveLoader(request, env) {
     } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
   }
   if ((script.loader_mode || "keyless") === "key" || script.product_id) {
-    if (!licenseKey) { await logRequest(env, name, "license_missing", request); return json(request, { ok: false, error: "license_required" }, 403); }
+    if (!licenseKey) { await logRequest(env, script.developer_id, name, "license_missing", request); return json(request, { ok: false, error: "license_required" }, 403); }
     const keyHash = await sha256Hex(licenseKey);
     let license;
     try { license = await env.DB.prepare("SELECT id, status, allowed_place_ids, expires_at FROM licenses WHERE key_hash = ? AND product_id = ? LIMIT 1").bind(keyHash, script.product_id || script.id).first(); }
     catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
-    if (!license || license.status !== "active") { await logRequest(env, name, "license_invalid", request); return json(request, { ok: false, error: "invalid_license" }, 403); }
-    if (license.expires_at && Date.parse(license.expires_at) <= Date.now()) { await logRequest(env, name, "license_expired", request); return json(request, { ok: false, error: "license_expired" }, 403); }
+    if (!license || license.status !== "active") { await logRequest(env, script.developer_id, name, "license_invalid", request); return json(request, { ok: false, error: "invalid_license" }, 403); }
+    if (license.expires_at && Date.parse(license.expires_at) <= Date.now()) { await logRequest(env, script.developer_id, name, "license_expired", request); return json(request, { ok: false, error: "license_expired" }, 403); }
     let allowedPlaceIds;
     try {
       allowedPlaceIds = JSON.parse(license.allowed_place_ids || "[]");
       if (!Array.isArray(allowedPlaceIds) || allowedPlaceIds.some((id) => !/^\d{1,32}$/.test(String(id)))) throw new Error("invalid place list");
     } catch {
-      await logRequest(env, name, "license_place_config_invalid", request);
+      await logRequest(env, script.developer_id, name, "license_place_config_invalid", request);
       return json(request, { ok: false, error: "invalid_license_place_config" }, 403);
     }
     const placeId = String(parsed.value.placeId || "").trim();
     if (allowedPlaceIds.length && (!/^\d{1,32}$/.test(placeId) || !allowedPlaceIds.map(String).includes(placeId))) {
-      await logRequest(env, name, "license_place_denied", request);
+      await logRequest(env, script.developer_id, name, "license_place_denied", request);
       return json(request, { ok: false, error: "place_not_allowed" }, 403);
     }
     try { await env.DB.prepare("UPDATE licenses SET last_verified_at = CURRENT_TIMESTAMP WHERE id = ?").bind(license.id).run(); } catch {}
@@ -173,16 +173,16 @@ async function resolveLoader(request, env) {
       const object = await env.BUCKET.get(objectKey);
       if (object) code = await object.text();
       else if (!code) {
-        await logRequest(env, name, "script_storage_missing", request);
+        await logRequest(env, script.developer_id, name, "script_storage_missing", request);
         return json(request, { ok: false, error: "script_storage_missing" }, 503);
       }
     } catch {
-      await logRequest(env, name, "script_storage_unavailable", request);
+      await logRequest(env, script.developer_id, name, "script_storage_unavailable", request);
       return json(request, { ok: false, error: "r2_storage_unavailable" }, 503);
     }
   }
   if (!code) return json(request, { ok: false, error: "script_content_empty" }, 503);
-  await logRequest(env, name, "script_delivered", request);
+  await logRequest(env, script.developer_id, name, "script_delivered", request);
   return json(request, { ok: true, scriptName: script.script_name, code });
 }
 
@@ -313,7 +313,8 @@ export default {
     if (productMatch && request.method === "PATCH") {
       const developer = await requireDeveloper(request, env);
       if (developer.error) return json(request, { ok: false, error: developer.error }, developer.status);
-      const productId = decodeURIComponent(productMatch[1]);
+      let productId;
+      try { productId = decodeURIComponent(productMatch[1]); } catch { return json(request, { ok: false, error: "invalid_product_id" }, 400); }
       const parsed = await readJson(request, 4096);
       if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
       const name = parsed.value?.name === undefined ? null : String(parsed.value.name).trim().slice(0, 100);
@@ -334,7 +335,7 @@ export default {
         const scripts = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active FROM scripts WHERE developer_id = ?").bind(developer.id).first();
         const products = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active FROM products WHERE developer_id = ?").bind(developer.id).first();
         const licenses = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active FROM licenses WHERE product_id IN (SELECT product_id FROM products WHERE developer_id = ?)").bind(developer.id).first();
-        const events = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN event_type = 'script_delivered' THEN 1 ELSE 0 END) AS delivered FROM loader_events WHERE script_name IN (SELECT script_name FROM scripts WHERE developer_id = ?)").bind(developer.id).first();
+        const events = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN event_type = 'script_delivered' THEN 1 ELSE 0 END) AS delivered FROM loader_events WHERE developer_id = ?").bind(developer.id).first();
         return json(request, { ok: true, scripts: scripts || { total: 0, active: 0 }, products: products || { total: 0, active: 0 }, licenses: licenses || { total: 0, active: 0 }, loaderEvents: events || { total: 0, delivered: 0 } });
       } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
     }
@@ -548,6 +549,10 @@ export default {
       try { row = await env.DB.prepare("SELECT id, product_id, status, allowed_place_ids, expires_at FROM licenses WHERE key_hash = ? AND product_id = ? LIMIT 1").bind(keyHash, productId).first(); }
       catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
       if (!row || row.status !== "active") return json(request, { ok: false, error: "invalid_license" }, 403);
+      try {
+        const product = await env.DB.prepare("SELECT status FROM products WHERE product_id = ? LIMIT 1").bind(productId).first();
+        if (!product || product.status !== "active") return json(request, { ok: false, error: "product_disabled" }, 403);
+      } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
       if (row.expires_at) { const expiry = Date.parse(row.expires_at); if (!Number.isFinite(expiry)) return json(request, { ok: false, error: "invalid_license_expiry" }, 403); if (expiry <= Date.now()) return json(request, { ok: false, error: "license_expired" }, 403); }
       let allowed;
       try {

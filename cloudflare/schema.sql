@@ -29,12 +29,14 @@ CREATE TABLE IF NOT EXISTS scripts (
 CREATE INDEX IF NOT EXISTS idx_scripts_user ON scripts(username_key, updated_at DESC);
 CREATE TABLE IF NOT EXISTS loader_events (
   id TEXT PRIMARY KEY,
+  developer_id TEXT,
   script_name TEXT NOT NULL,
   event_type TEXT NOT NULL,
   country TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_loader_events_script_created ON loader_events(script_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_loader_events_developer_created ON loader_events(developer_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS developers (
   id TEXT PRIMARY KEY,
   username TEXT NOT NULL,
