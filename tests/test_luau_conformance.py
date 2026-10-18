@@ -3,7 +3,6 @@ from pipeline import compile_source
 
 
 class LuauConformanceTests(unittest.TestCase):
-    """Ensure selected Luau features outside the implemented subset fail closed."""
 
     def test_supported_subset_smoke(self):
         chunk = compile_source(
@@ -16,14 +15,17 @@ class LuauConformanceTests(unittest.TestCase):
         self.assertIsInstance(chunk, bytes)
         self.assertGreater(len(chunk), 0)
 
+    def test_do_block_scopes_locals(self):
+        import io
+        from pipeline import run_source
+        out = io.StringIO()
+        run_source('local x = 1\ndo local x = 5 print(x) end\nprint(x)\n', 'do.lua', out)
+        self.assertEqual(out.getvalue(), '5\n1\n')
+
     def test_unsupported_luau_constructs_are_rejected(self):
         cases = {
-            'generic for': 'for key, value in pairs({}) do print(key) end',
-            'varargs': 'local function f(...) return ... end',
-            'do block': 'do local x = 1 end',
             'if expression': 'local x = if true then 1 else 2',
             'continue': 'while true do continue end',
-            'method declaration': 'function t:foo() end',
             'backtick interpolation': 'local x = `hello {name}`',
             'type annotation': 'local x: number = 1',
         }

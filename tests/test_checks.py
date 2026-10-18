@@ -1,4 +1,3 @@
-"""Phase 1 tests: input loading, limits, and error reporting."""
 
 import os
 import tempfile

@@ -273,14 +273,67 @@ test("JavaScript compiler rejects Luau syntax outside its documented subset", ()
   const unsupported = [
     "for key, value in pairs({}) do print(key) end",
     "local function f(...) return ... end",
-    "do local x = 1 end",
     "local x = if true then 1 else 2",
     "while true do continue end",
-    "function t:foo() end",
+    "goto done",
     "local x = `hello {name}`",
     "local x: number = 1",
   ];
   for (const source of unsupported) {
     assert.throws(() => compileAndPack(source), undefined, source);
   }
+});
+
+test("JavaScript compiler supports do blocks with block-scoped locals", () => {
+  const out = compileAndPack("local x = 1\ndo local x = 5 print(x) end\nprint(x)\n");
+  assert.equal(typeof out, "string");
+  assert.ok(out.length > 0);
+});
+
+test("CORS preflight allows PATCH used by the product update endpoint", async () => {
+  const response = await worker.fetch(request("/api/products/demo", { method: "OPTIONS" }), {});
+  assert.equal(response.status, 204);
+  assert.match(response.headers.get("access-control-allow-methods"), /\bPATCH\b/);
+});
+
+test("product update rejects a malformed percent-encoded product ID with 400 instead of crashing", async () => {
+  const DB = { prepare() { return { bind() { return { first: async () => ({ id: "dev-1", username: "Developer", username_key: "developer", role: "developer", status: "active" }) }; } }; } };
+  const response = await worker.fetch(request("/api/products/%E0%A4%A", { method: "PATCH", headers: { authorization: "Bearer developer-token-012345678901234567890123456789" }, body: JSON.stringify({ name: "Renamed" }) }), { DB });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "invalid_product_id");
+});
+
+test("JavaScript compiler evaluates a method-call receiver once and accepts method calls with arguments", () => {
+  const output = compileAndPack("local o = {}\nlocal function mk() return o end\nprint(mk():get(1, 2))");
+  assert.match(output, /elseif op==/);
+});
+
+test("legacy license verification rejects a license whose product is disabled", async () => {
+  const DB = { prepare(sql) { return { bind() { return { first: async () => {
+    if (sql.includes("FROM licenses")) return { id: "lic-1", product_id: "prod-1", status: "active", allowed_place_ids: "[]", expires_at: null };
+    if (sql.includes("FROM products")) return { status: "disabled" };
+    return null;
+  }, run: async () => ({ meta: { changes: 1 } }) }; } }; } };
+  const result = await read(await worker.fetch(request("/v1/license/verify", { method: "POST", body: JSON.stringify({ productId: "prod-1", licenseKey: "JX-TESTKEY", placeId: "1" }) }), { DB }));
+  assert.equal(result.status, 403);
+  assert.equal(result.body.error, "product_disabled");
+});
+
+test("loader events are recorded against the owning developer and analytics counts them by developer", async () => {
+  const inserts = [];
+  const queries = [];
+  const DB = { prepare(sql) { queries.push(sql); return { bind(...args) { return {
+    first: async () => sql.includes("FROM developers") ? ({ id: "dev-1", username: "Dev", username_key: "dev", role: "developer", status: "active" }) : sql.includes("FROM scripts") && sql.includes("COUNT") ? ({ total: 0, active: 0 }) : sql.includes("FROM loader_events") ? ({ total: 0, delivered: 0 }) : sql.includes("FROM products") ? ({ total: 0, active: 0 }) : sql.includes("FROM licenses") ? ({ total: 0, active: 0 }) : null,
+    all: async () => ({ results: [{ developer_id: "dev-1", username: "dev", username_key: "dev", script_name: "Demo", loader_mode: "keyless", status: "active" }] }),
+    run: async () => { if (sql.includes("INSERT INTO loader_events")) inserts.push(args); return { meta: { changes: 1 } }; },
+  }; } }; } };
+  const loader = await worker.fetch(request("/api/dev/Demo"), { DB });
+  assert.equal(loader.status, 200);
+  assert.equal(inserts.length, 1);
+  assert.equal(inserts[0][1], "dev-1");
+  assert.equal(inserts[0][2], "Demo");
+  const analytics = await worker.fetch(request("/api/analytics", { headers: { authorization: "Bearer developer-token-012345678901234567890123456789" } }), { DB });
+  assert.equal(analytics.status, 200);
+  assert.ok(queries.some((q) => /FROM loader_events WHERE developer_id = \?/.test(q)));
+  assert.ok(!queries.some((q) => /loader_events WHERE script_name IN/.test(q)));
 });

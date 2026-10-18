@@ -1,4 +1,3 @@
--- Executed by the upstream official Luau CLI in CI; not by the custom VM.
 type Pair = { key: string, value: number }
 local function collect(...: number): (number, string)
     local values = { ... }
