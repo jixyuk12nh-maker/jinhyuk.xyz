@@ -1,4 +1,3 @@
-import { compileAndPack } from "./compiler.js";
 const SITE_ORIGINS = new Set(["https://jinhyuk.xyz", "https://www.jinhyuk.xyz"]);
 const corsHeaders = (request) => {
   const origin = request.headers.get("Origin") || "";
@@ -406,14 +405,8 @@ export default {
       const productId = typeof body.productId === "string" && body.productId.trim() ? body.productId.trim().slice(0, 100) : null;
       if (!username || !scriptName || !sourceCode.trim()) return json(request, { ok: false, error: "missing_or_invalid_fields" }, 400);
       if (new TextEncoder().encode(sourceCode).byteLength > 512 * 1024) return json(request, { ok: false, error: "script_too_large" }, 413);
-      let code;
-      try {
-        code = compileAndPack(sourceCode, `${scriptName}.lua`);
-      } catch (error) {
-        const message = String(error?.message || "compile_failed").slice(0, 500);
-        return json(request, { ok: false, error: "compile_failed", message }, 400);
-      }
-      if (new TextEncoder().encode(code).byteLength > 1024 * 1024) return json(request, { ok: false, error: "compiled_script_too_large" }, 413);
+      const code = sourceCode;
+      if (new TextEncoder().encode(code).byteLength > 512 * 1024) return json(request, { ok: false, error: "script_too_large" }, 413);
       let id = crypto.randomUUID();
       const usernameKey = username.toLowerCase();
       const scriptKey = scriptName.toLowerCase();
@@ -460,7 +453,7 @@ export default {
         
         return json(request, { ok: false, error: "database_unavailable" }, 503);
       }
-      return json(request, { ok: true, username, scriptName, loaderMode, storage: storedInR2 ? "r2" : "d1_fallback", productId: productId || id, url: `https://jinhyuk.xyz/api/${encodeURIComponent(username)}/${encodeURIComponent(scriptName)}`, protected: true, compiler: "worker-js-lgvm", note: storedInR2 ? "컴파일 및 VM 패키징 완료. 보호된 Luau 코드가 R2에 저장되었습니다." : "컴파일 및 VM 패키징 완료. R2 바인딩이 없어 D1에 저장되었습니다." }, 201);
+      return json(request, { ok: true, username, scriptName, loaderMode, storage: storedInR2 ? "r2" : "d1_fallback", productId: productId || id, url: `https://jinhyuk.xyz/api/${encodeURIComponent(username)}/${encodeURIComponent(scriptName)}`, protected: false, compiler: null, note: storedInR2 ? "원본 스크립트가 R2에 저장되었습니다." : "원본 스크립트가 D1에 저장되었습니다. 난독화/VM 패키징은 아직 적용되지 않습니다." }, 201);
     }
 
     if (request.method === "GET" && url.pathname === "/api/scripts") {
