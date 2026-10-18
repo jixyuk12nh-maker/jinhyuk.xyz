@@ -9,8 +9,8 @@ run_worker_first = ["/api/*", "/raw/*"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "script-hosting-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_name = "tm-db"
+database_id = "9951ea1d-ab4d-44a8-8ba5-9e962092cf82"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
