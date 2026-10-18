@@ -1,9 +1,0 @@
-__pycache__/
-*.py[cod]
-.venv/
-.env
-.dev.vars
-.DS_Store
-*.luac
-output.lua
-protected.lua
