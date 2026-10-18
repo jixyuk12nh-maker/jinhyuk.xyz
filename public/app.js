@@ -1,103 +1,142 @@
-const $ = (selector, root = document) => root.querySelector(selector);
-const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const content = $('#content');
-const labels = {overview:'개요',products:'제품 관리',scripts:'스크립트 / VM',users:'사용자 정보',account:'계정 / API 키',licenses:'라이선스',analytics:'통계',compiler:'컴파일러',api:'API 문서',settings:'설정'};
-const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const panel = (title, body, eyebrow='TM WORKSPACE') => `<article class="glass info-card"><div class="eyebrow">${eyebrow}</div><h3 style="margin-top:9px">${title}</h3>${body}</article>`;
-const heading = (title, desc, eyebrow='WORKSPACE') => `<div class="page-heading"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${desc}</p></div></div>`;
-const pages = {
- products: () => `${heading('제품 관리','개발자 API 키로 본인 소유 제품을 조회하고 상태를 관리합니다.','PRODUCTS')}<div class="glass panel upload-panel"><label class="field-label" for="developerToken">개발자 API 키</label><input class="text-field" id="developerToken" type="password" placeholder="tm_dev_…" autocomplete="off"><div class="form-actions"><button class="button primary" id="loadProducts">제품 목록 불러오기</button><span id="productsStatus" class="note" role="status"></span></div><div id="productsList" class="data-list"><div class="empty-state">API 키를 입력한 뒤 목록을 불러오세요.</div></div><p class="note">제품은 키 모드 스크립트를 등록하면 자동 생성됩니다. 제품 이름과 활성 상태를 수정할 수 있습니다.</p></div>`,
- scripts: () => `${heading('스크립트 / VM','스크립트를 등록하고 키리스 또는 키 모드 로더를 생성합니다.','SCRIPT DELIVERY')}<div class="glass panel upload-panel"><div class="eyebrow">PUBLISH SCRIPT</div><h3>스크립트 등록</h3><p>개발자 API 토큰으로 인증한 뒤 스크립트를 등록합니다. 사용자 이름은 토큰에 연결된 개발자 계정에서 가져옵니다.</p><label class="field-label" for="developerToken">개발자 API 토큰 (현재 탭에서만 보관)</label><input class="text-field" id="developerToken" type="password" placeholder="tm_dev_…" autocomplete="off"><div class="form-grid"><div><label class="field-label" for="scriptName">스크립트 이름</label><input class="text-field" id="scriptName" maxlength="64" placeholder="MyScript" autocomplete="off"></div><div><label class="field-label" for="loaderMode">로더 모드</label><select class="text-field" id="loaderMode"><option value="keyless">키리스 모드 · 키 없이 실행</option><option value="key">키 모드 · 라이선스 인증 필요</option></select></div></div><label class="field-label" for="scriptFile">원본 Lua 파일 (.lua / .luau / .txt)</label><input class="text-field file-field" id="scriptFile" type="file" accept=".lua,.luau,.txt,text/plain"><label class="field-label" for="scriptCode">또는 원본 Lua 코드 붙여넣기</label><textarea class="text-field code-input" id="scriptCode" rows="9" spellcheck="false" placeholder="print('Hello, world!') 같은 원본 Lua 코드를 입력하세요"></textarea><div class="notice">Worker 안의 JavaScript 컴파일러가 업로드한 원본 Lua를 지원 문법으로 분석하고 자체 VM 런타임 코드로 패키징합니다. 컴파일 실패 시 파일은 저장되지 않습니다. 실험용 Luau 부분집합입니다. 현재 환경의 기본 전역 함수와 네이티브 호출을 전달하지만, Roblox API 전체 및 Luau 문법 전체를 보장하지 않습니다.</div><div class="form-actions"><button class="button primary" id="publishScript">등록하고 로더 URL 생성 <span>↗</span></button><span id="publishStatus" class="note" role="status" aria-live="polite"></span></div><div id="loaderResult" hidden><p id="productIdResult" class="note"></p><label class="field-label" for="generatedLoader">생성된 Roblox 로더</label><textarea class="text-field code-input" id="generatedLoader" rows="3" readonly></textarea><button class="inline-button" id="copyLoader">로더 복사</button></div></div><div class="page-grid script-info-grid">${panel('현재 파이프라인',`<div class="code-panel">Lua source → JS lexer/parser → LGVM bytecode → VM packager → R2</div><p>기존 vm/, compiler/, bytecode/ 코드는 유지합니다. 지원 문법은 제한적이며 완전한 Luau 런타임이 아닙니다.</p>`)}${panel('보호 결과 생성 예시',`<div class="code-panel">Worker JavaScript compiler
-Upload source.lua → protected Luau → R2</div><p>이제 업로드 시 Worker가 직접 컴파일하고 패키징합니다. 지원 문법은 제한적입니다. Roblox Studio에서는 임의 소스 문자열을 기본적으로 loadstring으로 실행할 수 없으므로 실제 실행 방식은 대상 Roblox 환경에 맞춰 별도 확인해야 합니다.</p>`)}</div>`,
- users: () => `${heading('사용자 정보','관리자 계정에서 가입한 계정과 상태를 확인하고 차단할 수 있습니다.','USER MANAGEMENT')}<div class="glass panel upload-panel"><div class="form-actions"><button class="button primary" id="loadUsers">사용자 목록 새로고침</button><span id="usersStatus" class="note" role="status"></span></div><div id="usersList" class="data-list"><div class="empty-state">관리자 계정으로 로그인하면 사용자 목록을 확인할 수 있습니다.</div></div></div>`,
- licenses: () => `${heading('라이선스 관리','개발자 인증 후 본인 소유 제품의 라이선스를 발급하거나 정지합니다.','LICENSES')}<div class="glass panel upload-panel"><h3>라이선스 키 발급</h3><label class="field-label" for="developerToken">개발자 API 토큰 (현재 탭에서만 보관)</label><input class="text-field" id="developerToken" type="password" placeholder="tm_dev_…" autocomplete="off"><label class="field-label" for="licenseProductId">Product ID</label><input class="text-field" id="licenseProductId" placeholder="스크립트 등록 후 표시된 Product ID"><label class="field-label" for="licenseExpiry">만료일 (선택)</label><input class="text-field" id="licenseExpiry" type="datetime-local"><div class="form-actions"><button class="button primary" id="createLicense">키 발급</button><span id="licenseStatus" class="note" role="status"></span></div><div id="licenseResult" hidden><label class="field-label" for="issuedLicenseKey">발급된 키 (이번에만 표시)</label><textarea class="text-field code-input" id="issuedLicenseKey" rows=2 readonly></textarea><button class="inline-button" id="copyLicenseKey">키 복사</button></div><p class="note">Product ID는 키 모드로 스크립트를 등록한 뒤 생성 결과에서 확인할 수 있습니다. 키는 해시로 저장되며 발급 응답에서만 원문을 확인할 수 있습니다.</p></div><div class="page-grid">${panel('검증 규칙',`<p>키 모드의 로더는 서버에서 키의 해시, 활성 상태, 만료일을 확인한 후에만 스크립트를 전달합니다.</p><button class="inline-button" data-go="api">API 명세 보기 →</button>`)}${panel('보안 안내',`<p>개발자 API 토큰이 필수입니다. 관리자 전용 개발자 관리 API는 D1의 admin 역할 계정으로 보호됩니다.</p>`)}</div>`,
- analytics: () => `${heading('통계','개발자 계정에 연결된 스크립트·제품·라이선스·로더 요청 통계입니다.','ANALYTICS')}<div class="glass panel upload-panel"><label class="field-label" for="developerToken">개발자 API 키</label><input class="text-field" id="developerToken" type="password" placeholder="tm_dev_…" autocomplete="off"><div class="form-actions"><button class="button primary" id="loadAnalytics">통계 불러오기</button><span id="analyticsStatus" class="note" role="status"></span></div><div id="analyticsResult" class="stats-grid"></div></div>`,
- compiler: () => `${heading('컴파일러','Worker 내부 JavaScript 컴파일러가 지원되는 Lua 부분집합을 VM 패키지로 변환합니다.','COMPILER')}<div class="page-grid">${panel('웹 컴파일 파이프라인',`<div class="code-panel">Lua source → JS lexer/parser → LGVM instruction prototypes → embedded Luau VM → R2</div><p>컴파일은 POST /api/scripts에서 수행됩니다. 컴파일 오류가 나면 결과물을 R2에 저장하지 않습니다.</p>`)}${panel('호환성 안내',`<p>실험용 Luau 부분집합입니다. 타입 주석, varargs, 다중 반환, 일반 반복자, coroutine, metatable 및 복잡한 Roblox API 동작은 지원이 제한됩니다.</p><div class="notice">JavaScript 포팅은 완료된 테스트 파이프라인이며, 실제 Roblox/Luau 실행 호환성은 별도 환경에서 확인해야 합니다.</div>`)}</div>`,
- api: () => `${heading('API 문서','현재 Worker에 실제 구현된 엔드포인트 기준입니다.','DEVELOPER DOCS')}<div class="page-grid">${panel('상태 확인',`<div class="api-line"><span class="method" style="color:#9bc0ff">GET</span><code>/health</code></div><p>서비스 버전과 D1 바인딩 여부를 반환합니다.</p><div class="code-panel">{
-  "ok": true,
-  "service": "tm API",
-  "version": "1.2.0",
-  "database": true
-}</div>`)}${panel('라이선스 검증',`<div class="api-line"><span class="method">POST</span><code>/v1/license/verify</code></div><p>JSON 요청 본문 예시:</p><div class="code-panel">{
-  "productId": "your-product-id",
-  "licenseKey": "YOUR-KEY",
-  "placeId": "123456789"
-}</div><p>성공 응답은 <code>ok: true</code>, 실패 시 HTTP 오류와 error 코드를 반환합니다.</p>`)}${panel('실제 Worker 주소',`<label class="field-label" for="apiBase">Worker 기본 URL</label><input class="text-field" id="apiBase" value="https://jinhyuk.xyz" autocomplete="url"><button class="inline-button" id="checkApi" style="margin-top:10px">연결 확인</button><div id="apiCheckResult" class="note">버튼을 누르면 GET /health 응답을 확인합니다.</div>`)}${panel('계정·개발자 API',`<div class="api-line"><span class="method">POST</span><code>/api/auth/signup</code></div><div class="api-line"><span class="method">POST</span><code>/api/auth/login</code></div><div class="api-line"><span class="method">POST</span><code>/api/auth/logout</code></div><div class="api-line"><span class="method">GET</span><code>/api/auth/me</code></div><div class="api-line"><span class="method">POST</span><code>/api/account/api-token</code></div><div class="api-line"><span class="method">GET</span><code>/api/account/admin/users</code></div><div class="api-line"><span class="method">GET</span><code>/api/products</code></div><div class="api-line"><span class="method">GET</span><code>/api/analytics</code></div><p>로그인은 HttpOnly 세션 쿠키를 사용합니다. 개발자 API 키 원문은 발급 응답에서만 확인할 수 있습니다.</p>`)}</div>`,
- account: () => `${heading('계정 및 개발자 API 키','이메일과 비밀번호로 계정을 만들고, 개발자 기능에서 사용할 API 키를 발급합니다.','ACCOUNT')}<div class="page-grid"><div class="glass panel upload-panel"><h3>회원가입</h3><label class="field-label" for="signupUsername">사용자 이름</label><input class="text-field" id="signupUsername" maxlength="40" placeholder="영문자·숫자·_·-"><label class="field-label" for="signupEmail">이메일</label><input class="text-field" id="signupEmail" type="email" autocomplete="email" placeholder="you@example.com"><label class="field-label" for="signupPassword">비밀번호 (10자 이상)</label><input class="text-field" id="signupPassword" type="password" autocomplete="new-password" minlength="10"><label class="field-label" for="signupRole">계정 유형</label><select class="text-field" id="signupRole"><option value="user">일반 사용자</option><option value="admin">관리자 (베타 테스트)</option></select><div class="notice">테스트 베타: 현재는 회원가입 시 관리자 역할을 직접 선택할 수 있습니다. 공개 서비스로 전환하기 전에는 반드시 관리자 선택을 제한해야 합니다.</div><div class="form-actions"><button class="button primary" id="signupButton">계정 만들기</button><span id="signupStatus" class="note" role="status"></span></div></div><div class="glass panel upload-panel"><h3>로그인</h3><label class="field-label" for="loginEmail">이메일</label><input class="text-field" id="loginEmail" type="email" autocomplete="email" placeholder="you@example.com"><label class="field-label" for="loginPassword">비밀번호</label><input class="text-field" id="loginPassword" type="password" autocomplete="current-password"><div class="form-actions"><button class="button secondary" id="loginButton">로그인</button><button class="inline-button" id="logoutButton">로그아웃</button><span id="loginStatus" class="note" role="status"></span></div><div id="accountStatus" class="notice">로그인 상태를 확인하는 중…</div><h3 style="margin-top:22px">개발자 API 키</h3><p>키는 개발자 API 요청 인증에 사용됩니다. 재발급하면 이전 키는 즉시 무효화됩니다.</p><button class="button primary" id="issueApiToken">API 키 발급 / 재발급</button><div id="apiTokenPanel" hidden><label class="field-label" for="issuedApiToken">이번에 발급된 키 (이 화면에서만 표시)</label><textarea class="text-field code-input" id="issuedApiToken" rows="3" readonly></textarea><button class="inline-button" id="copyApiToken">키 복사</button></div><span id="apiTokenStatus" class="note" role="status"></span></div></div>`,
+const $ = (id) => document.getElementById(id);
+const state = { view: "library", editingId: null, scripts: [], resultUrl: "" };
 
- settings: () => `${heading('설정','워크스페이스 연결과 현재 프로젝트 구성을 확인합니다.','SETTINGS')}<div class="page-grid">${panel('서비스 주소',`<label class="field-label">사이트</label><div class="code-panel">https://jinhyuk.xyz/</div><label class="field-label">기존 Roblox 로더 주소 (사용자 설정)</label><div class="code-panel">https://jinhyuk.xyz/api/로더</div><p>사이트 UI를 추가해도 기존 로더 주소는 자동으로 변경되지 않습니다.</p>`)}${panel('프로젝트 원칙',`<ul><li>vm/, compiler/, bytecode/ 구현 유지</li><li>기존 Worker의 검증 API 유지</li><li>없는 기능을 실제 동작하는 것처럼 표시하지 않기</li><li>기능 추가 전 기존 테스트로 회귀 확인</li></ul>`)}</div>`
-};
-async function apiRequest(path, options = {}) {
-  const headers = { ...(options.body ? { 'content-type': 'application/json' } : {}), ...(options.headers || {}) };
-  const response = await fetch(path, { credentials: 'same-origin', ...options, headers });
-  let data = {}; try { data = await response.json(); } catch {}
-  if (!response.ok || data.ok === false) throw new Error(data.message || data.error || `HTTP ${response.status}`);
+function showNotice(message, error = false) {
+  const box = $("notice");
+  box.textContent = message;
+  box.classList.toggle("error", error);
+  box.classList.remove("hidden");
+  window.clearTimeout(showNotice.timer);
+  showNotice.timer = window.setTimeout(() => box.classList.add("hidden"), 4500);
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { ...(options.body ? { "content-type": "application/json" } : {}), ...(options.headers || {}) }
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) throw new Error(data.error || `request_failed_${response.status}`);
   return data;
 }
-async function refreshAccount() {
-  const status = $('#accountStatus'); if (!status) return;
-  try { const data = await apiRequest('/api/auth/me'); if (!data.authenticated) { status.textContent = '로그인하지 않았습니다. 회원가입 또는 로그인해 주세요.'; return; } status.textContent = `로그인됨 · ${data.account.username} · ${data.account.email} · 역할: ${data.account.role === 'admin' ? '관리자' : '일반 사용자'}`; }
-  catch (error) { status.textContent = `계정 상태 확인 실패: ${error.message}`; }
+
+function switchView(view) {
+  state.view = view;
+  $("library-view").classList.toggle("hidden", view !== "library");
+  $("editor-view").classList.toggle("hidden", view !== "new");
+  $("page-title").textContent = view === "library" ? "스크립트 라이브러리" : state.editingId ? "스크립트 수정" : "스크립트 업로드";
+  document.querySelectorAll(".nav-item").forEach(el => el.classList.toggle("active", el.dataset.view === view));
+  if (view === "new") $("script-name").focus();
 }
-async function loadProducts() {
-  const status = $('#productsStatus'), list = $('#productsList'), token = $('#developerToken')?.value.trim(); if (!status || !list) return;
-  if (!token) { status.textContent = '계정 / API 키에서 키를 발급하거나 입력하세요.'; return; } status.textContent = '불러오는 중…';
-  try { const data = await apiRequest('/api/products', { headers: { authorization: `Bearer ${token}` } }); list.innerHTML = data.products.length ? data.products.map(p => `<div class="service-row"><div class="service-name"><div><b>${esc(p.name)}</b><small>${esc(p.productId)} · ${esc(p.status)}</small></div></div><div><button class="inline-button" data-product-rename="${esc(p.productId)}" data-name="${esc(p.name)}">이름 수정</button><button class="inline-button" data-product-toggle="${esc(p.productId)}" data-status="${p.status === 'active' ? 'disabled' : 'active'}">${p.status === 'active' ? '비활성화' : '활성화'}</button></div></div>`).join('') : '<div class="empty-state">제품이 없습니다. 스크립트 / VM에서 키 모드로 스크립트를 등록하세요.</div>'; status.textContent = `제품 ${data.products.length}개`; }
-  catch (error) { status.textContent = `불러오기 실패: ${error.message}`; }
+
+function startNew() {
+  state.editingId = null;
+  $("script-name").value = "";
+  $("script-source").value = "";
+  $("char-count").textContent = "0 characters";
+  $("save-button").textContent = "저장하고 URL 발급";
+  $("url-result").classList.add("hidden");
+  switchView("new");
 }
-async function loadUsers() {
-  const status = $('#usersStatus'), list = $('#usersList'); if (!status || !list) return; status.textContent = '불러오는 중…';
-  try { const data = await apiRequest('/api/account/admin/users'); list.innerHTML = data.users.length ? data.users.map(u => `<div class="service-row"><div class="service-name"><div><b>${esc(u.username)} <span class="muted">${esc(u.role)}</span></b><small>${esc(u.email)} · 가입 ${esc(u.createdAt)}</small></div></div><div><span class="service-state ${u.status === 'active' ? '' : 'pending'}">${esc(u.status)}</span><button class="inline-button" data-user-toggle="${esc(u.id)}" data-status="${u.status === 'active' ? 'disabled' : 'active'}">${u.status === 'active' ? '차단' : '차단 해제'}</button></div></div>`).join('') : '<div class="empty-state">가입 계정이 없습니다.</div>'; status.textContent = `계정 ${data.users.length}개`; }
-  catch (error) { status.textContent = `목록을 불러올 수 없습니다: ${error.message}. 관리자 계정으로 로그인했는지 확인하세요.`; }
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
-async function loadAnalytics() {
-  const status = $('#analyticsStatus'), result = $('#analyticsResult'), token = $('#developerToken')?.value.trim(); if (!status || !result) return;
-  if (!token) { status.textContent = '계정 / API 키에서 키를 발급하거나 입력하세요.'; return; } status.textContent = '집계 중…';
-  try { const d = await apiRequest('/api/analytics', { headers: { authorization: `Bearer ${token}` } }); const cards = [['스크립트',d.scripts.total,d.scripts.active],['제품',d.products.total,d.products.active],['라이선스',d.licenses.total,d.licenses.active],['로더 이벤트',d.loaderEvents.total,d.loaderEvents.delivered]]; result.innerHTML = cards.map(([label,total,active]) => `<article class="glass stat-card"><div class="stat-top"><span>${label}</span></div><div class="stat-value">${Number(total)||0}</div><div class="stat-foot">활성 / 전달: ${Number(active)||0}</div></article>`).join(''); status.textContent = '통계를 불러왔습니다.'; }
-  catch (error) { status.textContent = `통계 조회 실패: ${error.message}`; }
-}
-let currentView='overview';
-function render(view){const fn=pages[view];currentView=pages[view]?view:'overview';if(!fn){content.innerHTML=overviewMarkup();$('#crumb').textContent='개요';$$('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view==='overview'));return}content.innerHTML=`<section class="view-page">${fn()}<footer class="footer"><span>© 2026 TM Workspace</span><span>Experimental tooling · Not production-ready</span></footer></section>`;const tokenField=$('#developerToken');if(tokenField){try{tokenField.value=sessionStorage.getItem('tm_developer_token')||'';tokenField.addEventListener('input',()=>sessionStorage.setItem('tm_developer_token',tokenField.value));}catch{}}$('#crumb').textContent=labels[view]||view;$$('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('#sidebar').classList.remove('open');if(view==='account')refreshAccount();if(view==='products'&&tokenField?.value)loadProducts();if(view==='analytics'&&tokenField?.value)loadAnalytics();if(view==='users')loadUsers();}
-function overviewMarkup(){return `<section class="view-page">${heading('개요','서비스 연결 상태와 작업 현황을 확인합니다.','OVERVIEW')}<div class="page-grid">${panel('Worker 상태',`<div id="workerStat" class="stat-value">확인 중…</div><div id="workerFoot" class="stat-foot">상태를 확인하고 있습니다.</div>`)}${panel('데이터베이스',`<div id="dbState" class="service-state pending">확인 중…</div><p id="connectionSub">Worker 상태를 확인하고 있습니다.</p>`)}</div></section>`}
-function go(view){const target=pages[view]?view:'overview';history.replaceState(null,'',`#${target}`);if(target==='overview'){location.reload();return}render(target)}
-$$('[data-view]').forEach(b=>b.addEventListener('click',()=>go(b.dataset.view)));
-document.addEventListener('click',e=>{const target=e.target.closest('[data-go]');if(target)go(target.dataset.go);const copy=e.target.closest('[data-copy]');if(copy){navigator.clipboard?.writeText(copy.dataset.copy).then(()=>{copy.textContent='복사 완료 ✓'}).catch(()=>{copy.textContent='복사 권한을 확인하세요'})}});
-$('#mobileMenu').addEventListener('click',()=>$('#sidebar').classList.toggle('open'));
-document.addEventListener('click',e=>{if(window.innerWidth<=760&&$('#sidebar').classList.contains('open')&&!e.target.closest('#sidebar')&&!e.target.closest('#mobileMenu'))$('#sidebar').classList.remove('open')});
-document.addEventListener('change',async e=>{if(e.target.id!=='scriptFile')return;const file=e.target.files?.[0];if(!file)return;if(file.size>512*1024){$('#publishStatus').textContent='파일은 512KB 이하여야 합니다.';e.target.value='';return}try{$('#scriptCode').value=await file.text();$('#publishStatus').textContent=`파일 읽기 완료 · ${file.name} · ${file.size.toLocaleString()} bytes`;}catch{$('#publishStatus').textContent='파일을 읽지 못했습니다.'}});
-document.addEventListener('click',async e=>{
-if(e.target.id==='signupButton'){const status=$('#signupStatus');e.target.disabled=true;status.textContent='계정 생성 중…';try{const d=await apiRequest('/api/auth/signup',{method:'POST',body:JSON.stringify({username:$('#signupUsername').value.trim(),email:$('#signupEmail').value.trim(),password:$('#signupPassword').value,role:$('#signupRole').value})});status.textContent=`계정 생성 완료 · ${d.account.role==='admin'?'관리자':'일반 사용자'}로 로그인되었습니다.`;await refreshAccount();}catch(error){status.textContent=`회원가입 실패: ${error.message}`;}finally{e.target.disabled=false}}
-if(e.target.id==='loginButton'){const status=$('#loginStatus');e.target.disabled=true;status.textContent='로그인 중…';try{const d=await apiRequest('/api/auth/login',{method:'POST',body:JSON.stringify({email:$('#loginEmail').value.trim(),password:$('#loginPassword').value})});status.textContent=`로그인 완료 · ${d.account.username}`;await refreshAccount();}catch(error){status.textContent=`로그인 실패: ${error.message}`;}finally{e.target.disabled=false}}
-if(e.target.id==='logoutButton'){try{await apiRequest('/api/auth/logout',{method:'POST',body:'{}'});$('#loginStatus').textContent='로그아웃했습니다.';$('#accountStatus').textContent='로그인하지 않았습니다.';}catch(error){$('#loginStatus').textContent=`로그아웃 실패: ${error.message}`;}}
-if(e.target.id==='issueApiToken'){const status=$('#apiTokenStatus');e.target.disabled=true;status.textContent='API 키 발급 중…';try{const d=await apiRequest('/api/account/api-token',{method:'POST',body:'{}'});$('#issuedApiToken').value=d.apiToken;$('#apiTokenPanel').hidden=false;sessionStorage.setItem('tm_developer_token',d.apiToken);status.textContent=`발급 완료 · 역할 ${d.role}. 키는 이번에만 표시됩니다.`;}catch(error){status.textContent=`발급 실패: ${error.message}. 먼저 로그인하세요.`;}finally{e.target.disabled=false}}
-if(e.target.id==='copyApiToken'){try{await navigator.clipboard.writeText($('#issuedApiToken').value);e.target.textContent='복사 완료 ✓';}catch{$('#issuedApiToken').focus();$('#issuedApiToken').select();e.target.textContent='선택됨 · 직접 복사하세요';}}
-if(e.target.id==='loadProducts')loadProducts();if(e.target.id==='loadUsers')loadUsers();if(e.target.id==='loadAnalytics')loadAnalytics();
-if(e.target.matches('[data-product-rename]')){const name=prompt('새 제품 이름을 입력하세요.',e.target.dataset.name||'');if(name&&name.trim()){const token=sessionStorage.getItem('tm_developer_token')||'';try{await apiRequest(`/api/products/${encodeURIComponent(e.target.dataset.productRename)}`,{method:'PATCH',headers:{authorization:`Bearer ${token}`},body:JSON.stringify({name:name.trim()})});loadProducts();}catch(error){$('#productsStatus').textContent=`이름 변경 실패: ${error.message}`;}}}
-if(e.target.matches('[data-product-toggle]')){const token=sessionStorage.getItem('tm_developer_token')||'';try{await apiRequest(`/api/products/${encodeURIComponent(e.target.dataset.productToggle)}`,{method:'PATCH',headers:{authorization:`Bearer ${token}`},body:JSON.stringify({status:e.target.dataset.status})});loadProducts();}catch(error){$('#productsStatus').textContent=`상태 변경 실패: ${error.message}`;}}
-if(e.target.matches('[data-user-toggle]')){try{await apiRequest(`/api/account/admin/users/${encodeURIComponent(e.target.dataset.userToggle)}/status`,{method:'POST',body:JSON.stringify({status:e.target.dataset.status})});loadUsers();}catch(error){$('#usersStatus').textContent=`계정 상태 변경 실패: ${error.message}`;}}
-if(e.target.id==='publishScript'){const button=e.target,scriptName=$('#scriptName').value.trim(),code=$('#scriptCode').value;const status=$('#publishStatus');const token=$('#developerToken').value.trim();const valid=/^[A-Za-z0-9_-]{1,64}$/.test(scriptName);if(!token){status.textContent='개발자 API 토큰을 입력하세요.';return}if(!valid){status.textContent='스크립트 이름은 영문자, 숫자, _ 또는 -만 사용할 수 있습니다.';return}if(!code.trim()){status.textContent='원본 Lua 파일을 선택하거나 코드를 붙여넣으세요.';return}button.disabled=true;status.textContent='등록 중…';try{const response=await fetch(`${location.origin}/api/scripts`,{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${token}`},body:JSON.stringify({scriptName,sourceCode:code,loaderMode:$('#loaderMode').value})});const data=await response.json();if(!response.ok||!data.ok){const detail=typeof data.message==='string'&&data.message.trim()?`: ${data.message}`:'';throw new Error(`${data.error||`HTTP ${response.status}`}${detail}`)}$('#productIdResult').textContent=$('#loaderMode').value==='key'?`라이선스 발급용 Product ID: ${data.productId}`:'';$('#generatedLoader').value=$('#loaderMode').value==='key'?`Script_key = \"발급받은_키\"\nloadstring(game:HttpGet(${JSON.stringify(data.url)}))()`:`loadstring(game:HttpGet(${JSON.stringify(data.url)}))()`;$('#loaderResult').hidden=false;status.textContent=(data.protected?'VM 컴파일·패키징 완료 · ':'')+(data.storage==='r2'?'R2 저장 완료. URL을 확인하세요.':data.storage==='d1_fallback'?'R2 미연결이라 D1에 저장됨.':'등록 완료. URL을 확인하세요.');}catch(err){status.textContent=`등록 실패: ${err.message||'API 연결 오류'}. Worker 배포, D1 스키마 및 CORS를 확인하세요.`}finally{button.disabled=false}}
-if(e.target.id==='copyLoader'){const area=$('#generatedLoader');try{await navigator.clipboard.writeText(area.value);e.target.textContent='복사 완료 ✓'}catch{area.focus();area.select();e.target.textContent='선택됨 · 직접 복사하세요'}}});
-document.addEventListener('click', async e => {
-  if (e.target.id === 'createLicense') {
-    const productId = $('#licenseProductId').value.trim();
-    const token = $('#developerToken').value.trim();
-    const rawExpiry = $('#licenseExpiry').value;
-    const status = $('#licenseStatus');
-    if (!token) { status.textContent = '개발자 API 토큰을 입력하세요.'; return; }
-    if (!productId) { status.textContent = 'Product ID를 입력하세요.'; return; }
-    const button = e.target; button.disabled = true; status.textContent = '발급 중…';
-    try {
-      const response = await fetch(`${location.origin}/api/licenses`, { method: 'POST', headers: { 'content-type': 'application/json', 'authorization': `Bearer ${token}` }, body: JSON.stringify({ productId, expiresAt: rawExpiry ? new Date(rawExpiry).toISOString() : null }) });
-      const data = await response.json(); if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-      $('#issuedLicenseKey').value = data.licenseKey; $('#licenseResult').hidden = false; status.textContent = '발급 완료 · 키를 안전한 곳에 보관하세요.';
-    } catch (err) { status.textContent = `발급 실패: ${err.message || 'API 오류'}`; }
-    finally { button.disabled = false; }
+
+function renderScripts() {
+  const list = $("script-list");
+  list.innerHTML = "";
+  $("empty-state").classList.toggle("hidden", state.scripts.length > 0);
+  for (const script of state.scripts) {
+    const card = document.createElement("article");
+    card.className = "script-card";
+    const rawUrl = `${location.origin}/raw/${script.id}`;
+    card.innerHTML = `<div class="card-top"><div class="file-icon">⌘</div><div><div class="card-name">${escapeHtml(script.name)}</div><div class="card-date">${new Date(script.updated_at || script.created_at).toLocaleString()}</div></div></div>
+      <div class="card-size">${Number(script.size || 0).toLocaleString()} bytes · 원본 소스</div>
+      <div class="card-url" title="${escapeHtml(rawUrl)}">${escapeHtml(rawUrl)}</div>
+      <div class="card-actions"><button class="secondary" data-action="copy">URL 복사</button><button class="secondary" data-action="edit">수정</button><button class="secondary" data-action="delete">삭제</button></div>`;
+    card.querySelector('[data-action="copy"]').addEventListener("click", () => copyText(rawUrl));
+    card.querySelector('[data-action="edit"]').addEventListener("click", () => editScript(script.id));
+    card.querySelector('[data-action="delete"]').addEventListener("click", () => deleteScript(script.id, script.name));
+    list.append(card);
   }
-  if (e.target.id === 'copyLicenseKey') {
-    try { await navigator.clipboard.writeText($('#issuedLicenseKey').value); e.target.textContent = '복사 완료 ✓'; }
-    catch { $('#issuedLicenseKey').focus(); $('#issuedLicenseKey').select(); e.target.textContent = '선택됨 · 직접 복사하세요'; }
+}
+
+async function loadScripts() {
+  try {
+    const data = await api("/api/scripts");
+    state.scripts = data.scripts || [];
+    renderScripts();
+    document.querySelector(".sidebar-bottom").innerHTML = '<span class="status-dot" style="background:#72dfac"></span> API 연결됨';
+  } catch (error) {
+    showNotice("목록을 불러오지 못했습니다. D1 설정과 마이그레이션을 확인하세요: " + error.message, true);
+    document.querySelector(".sidebar-bottom").innerHTML = '<span class="status-dot"></span> API 연결 실패';
   }
+}
+
+async function editScript(id) {
+  try {
+    const data = await api(`/api/scripts/${id}`);
+    state.editingId = id;
+    $("script-name").value = data.script.name;
+    $("script-source").value = data.script.source;
+    $("char-count").textContent = `${data.script.source.length.toLocaleString()} characters`;
+    $("save-button").textContent = "변경 사항 저장";
+    $("url-result").classList.add("hidden");
+    switchView("new");
+  } catch (error) { showNotice("스크립트를 불러오지 못했습니다: " + error.message, true); }
+}
+
+async function deleteScript(id, name) {
+  if (!confirm(`"${name}" 스크립트를 삭제할까요? 발급된 URL도 더 이상 작동하지 않습니다.`)) return;
+  try {
+    await api(`/api/scripts/${id}`, { method: "DELETE" });
+    showNotice("스크립트를 삭제했습니다.");
+    await loadScripts();
+  } catch (error) { showNotice("삭제 실패: " + error.message, true); }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showNotice("클립보드에 복사했습니다.");
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text; document.body.append(area); area.select();
+    const ok = document.execCommand("copy"); area.remove();
+    showNotice(ok ? "클립보드에 복사했습니다." : "복사에 실패했습니다. 텍스트를 직접 선택해 주세요.", !ok);
+  }
+}
+
+$("save-button").addEventListener("click", async () => {
+  const name = $("script-name").value.trim();
+  const source = $("script-source").value;
+  if (!name || !source.trim()) return showNotice("이름과 스크립트 코드를 입력하세요.", true);
+  if (new TextEncoder().encode(source).byteLength > 256 * 1024) return showNotice("스크립트는 256 KB 이하여야 합니다.", true);
+  const button = $("save-button");
+  button.disabled = true; button.textContent = "저장 중…";
+  try {
+    const data = state.editingId
+      ? await api(`/api/scripts/${state.editingId}`, { method: "PUT", body: JSON.stringify({ name, source }) })
+      : await api("/api/scripts", { method: "POST", body: JSON.stringify({ name, source }) });
+    const url = data.script.url || `${location.origin}/raw/${data.script.id}`;
+    $("result-url").textContent = url;
+    $("loader-code").textContent = `loadstring(game:HttpGet("${url}"))()`;
+    $("url-result").classList.remove("hidden");
+    state.editingId = data.script.id;
+    $("save-button").textContent = "변경 사항 저장";
+    showNotice("저장 완료. URL이 발급되었습니다.");
+    await loadScripts();
+  } catch (error) { showNotice("저장 실패: " + error.message, true); }
+  finally { button.disabled = false; button.textContent = state.editingId ? "변경 사항 저장" : "저장하고 URL 발급"; }
 });
-async function checkHealth(){const base=location.origin;const dot=$('#statusDot'),topDot=$('#topDot');try{const res=await fetch(base+'/health',{headers:{accept:'application/json'}});if(!res.ok)throw new Error('HTTP '+res.status);const data=await res.json();if(data.ok!==true)throw new Error('health response invalid');[dot,topDot].forEach(el=>{el.style.background='#74e4b0';el.style.color='#74e4b0'});$('#connectionText').textContent='Worker 연결 정상';$('#connectionSub').textContent=data.r2Storage?'Worker · D1 · R2 연결 확인':'Worker 응답 정상 · R2 연결 여부 확인 필요';$('#topStatus').textContent='API 연결 정상';$('#workerStat').textContent='Online';$('#workerFoot').textContent='GET /health 응답 정상';$('#workerState').textContent='정상';$('#workerState').className='service-state';$('#dbState').textContent=data.database?'바인딩됨':'미설정';$('#dbState').className=data.database?'service-state':'service-state pending';}catch(err){[dot,topDot].forEach(el=>{el.style.background='#ff7b91';el.style.color='#ff7b91'});$('#connectionText').textContent='Worker 연결 실패';$('#connectionSub').textContent='주소 또는 네트워크 확인';$('#topStatus').textContent='API 연결 실패';$('#workerStat').textContent='Offline';$('#workerFoot').textContent='상태 확인에 실패했습니다';$('#workerState').textContent='오류';$('#workerState').className='service-state error';$('#dbState').textContent='확인 불가';$('#dbState').className='service-state pending';}}
-document.addEventListener('click',async e=>{if(e.target.id!=='checkApi')return;const base=$('#apiBase').value.trim().replace(/\/+$/,'');const out=$('#apiCheckResult');if(!/^https:\/\//i.test(base)){out.textContent='https:// 형식의 URL을 입력하세요.';return}out.textContent='연결 확인 중…';try{const r=await fetch(base+'/health');const d=await r.json();out.textContent=r.ok&&d.ok===true?`연결 성공 · ${d.service||'API'} · D1 ${d.database?'연결됨':'미설정'}`:`응답 확인 필요 · HTTP ${r.status}`;}catch{out.textContent='연결 실패. Worker 주소, CORS 설정 또는 네트워크를 확인하세요.'}});
-const start=location.hash.replace('#','');if(start&&start!=='overview'&&pages[start])render(start);checkHealth();setInterval(()=>{if(!document.hidden)checkHealth();},15000);setInterval(()=>{if(document.hidden)return;if(currentView==='account')refreshAccount();if(currentView==='products'&&$('#developerToken')?.value.trim())loadProducts();if(currentView==='analytics'&&$('#developerToken')?.value.trim())loadAnalytics();if(currentView==='users')loadUsers();},20000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){checkHealth();if(currentView==='account')refreshAccount();if(currentView==='products'&&$('#developerToken')?.value.trim())loadProducts();if(currentView==='analytics'&&$('#developerToken')?.value.trim())loadAnalytics();if(currentView==='users')loadUsers();}});
+
+$("script-source").addEventListener("input", () => $("char-count").textContent = `${$("script-source").value.length.toLocaleString()} characters`);
+$("new-button").addEventListener("click", startNew);
+$("empty-new").addEventListener("click", startNew);
+$("cancel-button").addEventListener("click", () => switchView("library"));
+$("refresh-button").addEventListener("click", loadScripts);
+$("copy-url").addEventListener("click", () => copyText($("result-url").textContent));
+$("copy-loader").addEventListener("click", () => copyText($("loader-code").textContent));
+document.querySelectorAll(".nav-item").forEach(el => el.addEventListener("click", () => el.dataset.view === "new" ? startNew() : switchView("library")));
+loadScripts();
