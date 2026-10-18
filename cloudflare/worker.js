@@ -21,6 +21,41 @@ async function sha256Hex(value) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+function randomHex(size = 16) {
+  return [...crypto.getRandomValues(new Uint8Array(size))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function passwordHash(password, saltHex) {
+  const salt = Uint8Array.from(saltHex.match(/.{2}/g) || [], (x) => parseInt(x, 16));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 120000 }, key, 256);
+  return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function cookieValue(request, name) {
+  const raw = request.headers.get("Cookie") || "";
+  for (const part of raw.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return rest.join("=");
+  }
+  return null;
+}
+function cookieResponse(response, token, maxAge = 604800) {
+  const headers = new Headers(response.headers);
+  headers.append("set-cookie", `tm_session=${token || ""}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+async function requireAccount(request, env) {
+  if (!env.DB) return { error: "database_not_configured", status: 503 };
+  const token = cookieValue(request, "tm_session");
+  if (!token) return { error: "login_required", status: 401 };
+  try {
+    const account = await env.DB.prepare("SELECT a.id, a.username, a.email, a.role, a.status, a.created_at AS createdAt FROM sessions s JOIN accounts a ON a.id = s.account_id WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP LIMIT 1").bind(await sha256Hex(token)).first();
+    if (!account || account.status !== "active") return { error: "invalid_session", status: 401 };
+    return account;
+  } catch { return { error: "database_unavailable", status: 503 }; }
+}
+function withSession(response, token) {
+  return cookieResponse(response, token, 604800);
+}
 function bearerToken(request) {
   const value = request.headers.get("Authorization") || "";
   const match = /^Bearer\s+(\S{24,512})$/i.exec(value);
@@ -102,6 +137,12 @@ async function resolveLoader(request, env) {
   if (matches.length !== 1) return json(request, { ok: false, error: matches.length > 1 ? "script_name_ambiguous" : "script_not_found" }, matches.length > 1 ? 409 : 404);
   const script = matches[0];
   if (script.status !== "active") return json(request, { ok: false, error: "script_disabled" }, 403);
+  if (script.product_id) {
+    try {
+      const product = await env.DB.prepare("SELECT status FROM products WHERE product_id = ? LIMIT 1").bind(script.product_id).first();
+      if (!product || product.status !== "active") return json(request, { ok: false, error: "product_disabled" }, 403);
+    } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+  }
   if ((script.loader_mode || "keyless") === "key" || script.product_id) {
     if (!licenseKey) { await logRequest(env, name, "license_missing", request); return json(request, { ok: false, error: "license_required" }, 403); }
     const keyHash = await sha256Hex(licenseKey);
@@ -152,6 +193,150 @@ export default {
 
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
       return json(request, { ok: true, service: "tm API", version: "1.2.0", database: Boolean(env.DB), r2Storage: Boolean(env.BUCKET), scriptLoader: true });
+    }
+
+    if (url.pathname === "/api/auth/signup" && request.method === "POST") {
+      if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
+      const parsed = await readJson(request, 8192);
+      if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
+      const body = parsed.value || {};
+      const username = cleanSegment(String(body.username || ""), 40);
+      const email = String(body.email || "").trim().toLowerCase();
+      const password = String(body.password || "");
+      const role = body.role === "admin" ? "admin" : body.role === "user" ? "user" : null;
+      if (!username || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || password.length < 10 || password.length > 128 || !role) return json(request, { ok: false, error: "invalid_signup_fields", message: "사용자 이름, 이메일, 10~128자 비밀번호와 역할을 확인하세요." }, 400);
+      const salt = randomHex(16);
+      const hash = await passwordHash(password, salt);
+      const accountId = crypto.randomUUID();
+      const sessionToken = randomSecret("tm_session_");
+      const sessionId = crypto.randomUUID();
+      try {
+        await env.DB.prepare("INSERT INTO accounts (id, username, username_key, email, password_hash, password_salt, role, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')")
+          .bind(accountId, username, username.toLowerCase(), email, hash, salt, role).run();
+        await env.DB.prepare("INSERT INTO sessions (id, account_id, token_hash, expires_at) VALUES (?, ?, ?, datetime('now', '+7 days'))")
+          .bind(sessionId, accountId, await sha256Hex(sessionToken)).run();
+        const response = json(request, { ok: true, account: { id: accountId, username, email, role, status: "active" }, betaNotice: role === "admin" ? "베타 설정: 공개 회원가입에서 관리자 역할을 선택할 수 있습니다." : undefined }, 201);
+        return withSession(response, sessionToken);
+      } catch (error) {
+        const message = String(error?.message || "");
+        return json(request, { ok: false, error: message.includes("UNIQUE") ? "account_already_exists" : "account_create_failed" }, message.includes("UNIQUE") ? 409 : 503);
+      }
+    }
+
+    if (url.pathname === "/api/auth/login" && request.method === "POST") {
+      if (!env.DB) return json(request, { ok: false, error: "database_not_configured" }, 503);
+      const parsed = await readJson(request, 8192);
+      if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
+      const email = String(parsed.value?.email || "").trim().toLowerCase();
+      const password = String(parsed.value?.password || "");
+      if (!email || !password || password.length > 128) return json(request, { ok: false, error: "invalid_credentials" }, 400);
+      try {
+        const row = await env.DB.prepare("SELECT id, username, email, password_hash, password_salt, role, status, created_at AS createdAt FROM accounts WHERE email = ? LIMIT 1").bind(email).first();
+        if (!row || row.status !== "active" || await passwordHash(password, row.password_salt) !== row.password_hash) return json(request, { ok: false, error: "invalid_credentials" }, 401);
+        const token = randomSecret("tm_session_");
+        await env.DB.prepare("INSERT INTO sessions (id, account_id, token_hash, expires_at) VALUES (?, ?, ?, datetime('now', '+7 days'))").bind(crypto.randomUUID(), row.id, await sha256Hex(token)).run();
+        const response = json(request, { ok: true, account: { id: row.id, username: row.username, email: row.email, role: row.role, status: row.status, createdAt: row.createdAt } });
+        return withSession(response, token);
+      } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+    }
+
+    if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+      const token = cookieValue(request, "tm_session");
+      if (env.DB && token) {
+        try { await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256Hex(token)).run(); } catch {}
+      }
+      return cookieResponse(json(request, { ok: true }), "", 0);
+    }
+
+    if (url.pathname === "/api/auth/me" && request.method === "GET") {
+      const account = await requireAccount(request, env);
+      if (account.error) return json(request, { ok: true, authenticated: false });
+      return json(request, { ok: true, authenticated: true, account });
+    }
+
+    if (url.pathname === "/api/account/api-token" && request.method === "POST") {
+      const account = await requireAccount(request, env);
+      if (account.error) return json(request, { ok: false, error: account.error }, account.status);
+      const token = randomSecret();
+      try {
+        const existing = await env.DB.prepare("SELECT id FROM developers WHERE account_id = ? LIMIT 1").bind(account.id).first();
+        if (existing) {
+          await env.DB.prepare("UPDATE developers SET username = ?, username_key = ?, token_hash = ?, role = ?, status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(account.username, account.username.toLowerCase(), await sha256Hex(token), account.role === "admin" ? "admin" : "developer", existing.id).run();
+        } else {
+          await env.DB.prepare("INSERT INTO developers (id, account_id, username, username_key, token_hash, role, status) VALUES (?, ?, ?, ?, ?, ?, 'active')")
+            .bind(crypto.randomUUID(), account.id, account.username, account.username.toLowerCase(), await sha256Hex(token), account.role === "admin" ? "admin" : "developer").run();
+        }
+        return json(request, { ok: true, apiToken: token, role: account.role === "admin" ? "admin" : "developer", warning: "새 API 키는 이번 응답에서만 표시됩니다. 재발급하면 이전 키는 즉시 무효화됩니다." }, 201);
+      } catch { return json(request, { ok: false, error: "api_token_issue_failed" }, 503); }
+    }
+
+    if (url.pathname === "/api/account/admin/users" && request.method === "GET") {
+      const account = await requireAccount(request, env);
+      if (account.error) return json(request, { ok: false, error: account.error }, account.status);
+      if (account.role !== "admin") return json(request, { ok: false, error: "admin_role_required" }, 403);
+      try {
+        const result = await env.DB.prepare("SELECT id, username, email, role, status, created_at AS createdAt FROM accounts ORDER BY created_at DESC LIMIT 500").all();
+        return json(request, { ok: true, users: result.results || [] });
+      } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+    }
+
+    const accountStatusMatch = /^\/api\/account\/admin\/users\/([0-9a-f-]{36})\/status$/.exec(url.pathname);
+    if (accountStatusMatch && request.method === "POST") {
+      const account = await requireAccount(request, env);
+      if (account.error) return json(request, { ok: false, error: account.error }, account.status);
+      if (account.role !== "admin") return json(request, { ok: false, error: "admin_role_required" }, 403);
+      if (account.id === accountStatusMatch[1]) return json(request, { ok: false, error: "cannot_disable_self" }, 400);
+      const parsed = await readJson(request, 4096);
+      if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
+      const status = parsed.value?.status;
+      if (!["active", "disabled"].includes(status)) return json(request, { ok: false, error: "invalid_status" }, 400);
+      try {
+        const result = await env.DB.prepare("UPDATE accounts SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, accountStatusMatch[1]).run();
+        if (!result.meta?.changes) return json(request, { ok: false, error: "user_not_found" }, 404);
+        await env.DB.prepare("UPDATE developers SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE account_id = ?").bind(status, accountStatusMatch[1]).run();
+        if (status === "disabled") await env.DB.prepare("DELETE FROM sessions WHERE account_id = ?").bind(accountStatusMatch[1]).run();
+        return json(request, { ok: true, status });
+      } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/products") {
+      const developer = await requireDeveloper(request, env);
+      if (developer.error) return json(request, { ok: false, error: developer.error }, developer.status);
+      try {
+        const result = await env.DB.prepare("SELECT product_id AS productId, name, status, script_id AS scriptId, created_at AS createdAt, updated_at AS updatedAt FROM products WHERE developer_id = ? ORDER BY created_at DESC LIMIT 500").bind(developer.id).all();
+        return json(request, { ok: true, products: result.results || [] });
+      } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+    }
+
+    const productMatch = /^\/api\/products\/([^/]+)$/.exec(url.pathname);
+    if (productMatch && request.method === "PATCH") {
+      const developer = await requireDeveloper(request, env);
+      if (developer.error) return json(request, { ok: false, error: developer.error }, developer.status);
+      const productId = decodeURIComponent(productMatch[1]);
+      const parsed = await readJson(request, 4096);
+      if (parsed.error) return json(request, { ok: false, error: parsed.error }, parsed.status);
+      const name = parsed.value?.name === undefined ? null : String(parsed.value.name).trim().slice(0, 100);
+      const status = parsed.value?.status === undefined ? null : parsed.value.status;
+      if ((name !== null && !name) || (status !== null && !["active", "disabled"].includes(status)) || (name === null && status === null)) return json(request, { ok: false, error: "invalid_product_update" }, 400);
+      try {
+        const current = await env.DB.prepare("SELECT product_id FROM products WHERE product_id = ? AND developer_id = ? LIMIT 1").bind(productId, developer.id).first();
+        if (!current) return json(request, { ok: false, error: "product_not_found_or_forbidden" }, 404);
+        await env.DB.prepare("UPDATE products SET name = COALESCE(?, name), status = COALESCE(?, status), updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND developer_id = ?").bind(name, status, productId, developer.id).run();
+        return json(request, { ok: true });
+      } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/analytics") {
+      const developer = await requireDeveloper(request, env);
+      if (developer.error) return json(request, { ok: false, error: developer.error }, developer.status);
+      try {
+        const scripts = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active FROM scripts WHERE developer_id = ?").bind(developer.id).first();
+        const products = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active FROM products WHERE developer_id = ?").bind(developer.id).first();
+        const licenses = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active FROM licenses WHERE product_id IN (SELECT product_id FROM products WHERE developer_id = ?)").bind(developer.id).first();
+        const events = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN event_type = 'script_delivered' THEN 1 ELSE 0 END) AS delivered FROM loader_events WHERE script_name IN (SELECT script_name FROM scripts WHERE developer_id = ?)").bind(developer.id).first();
+        return json(request, { ok: true, scripts: scripts || { total: 0, active: 0 }, products: products || { total: 0, active: 0 }, licenses: licenses || { total: 0, active: 0 }, loaderEvents: events || { total: 0, delivered: 0 } });
+      } catch { return json(request, { ok: false, error: "database_unavailable" }, 503); }
     }
 
     if (url.pathname.startsWith("/api/admin/")) {
