@@ -1,4 +1,3 @@
--- Run this migration once against an existing D1 database.
 ALTER TABLE scripts ADD COLUMN loader_mode TEXT NOT NULL DEFAULT 'keyless' CHECK (loader_mode IN ('keyless', 'key'));
 ALTER TABLE scripts ADD COLUMN product_id TEXT;
 CREATE TABLE IF NOT EXISTS loader_events (
