@@ -34,6 +34,11 @@ class PackagerTests(unittest.TestCase):
         self.assertIn('string.format(\"%.14g\",v)', output)
         self.assertIn('if b==0 then return nil end', output)
 
+    def test_call_arguments_skip_the_function_register(self):
+        output = pack_source('local function add(a, b) return a + b end\nprint(add(2, 3))', 'call.lua', seed=4)
+        self.assertIn('for i=1,b do args2[i]=regs[a+i+1].value end', output)
+        self.assertNotIn('for i=1,b do args2[i]=regs[a+i].value end', output)
+
     def test_string_constants_and_instruction_operands_are_encoded(self):
         output = pack_source('print("secret-marker-xyz", 41)', 'protected.lua', seed=17)
         self.assertNotIn('secret-marker-xyz', output)
