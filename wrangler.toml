@@ -1,6 +1,6 @@
-name = "script-hosting-starter"
+name = "tm"
 main = "src/worker.js"
-compatibility_date = "2026-10-13"
+compatibility_date = "2026-10-16"
 
 [assets]
 directory = "./public"
@@ -15,4 +15,4 @@ migrations_dir = "migrations"
 
 [[r2_buckets]]
 binding = "SCRIPTS"
-bucket_name = "script-hosting-files"
+bucket_name = "jinhyuk--xyz"
