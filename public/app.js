@@ -13,7 +13,7 @@
   const TOKEN_RE = /^tmk_[A-Za-z0-9_-]{20,}$/;
   const GEAR = '<svg viewBox="0 0 24 24" aria-hidden="true" width="18" height="18" fill="currentColor"><path d="m19.42 13.1 1.11.86-1.93 3.34-1.3-.52c-.47.35-.99.65-1.55.87l-.19 1.38h-3.85l-.19-1.38c-.56-.22-1.08-.52-1.55-.87l-1.3.52-1.93-3.34 1.11-.86a6.96 6.96 0 0 1 0-1.8l-1.11-.86L8.67 7.1l1.3.52c.47-.35.99-.65 1.55-.87l.19-1.38h3.85l.19 1.38c.56.22 1.08.52 1.55.87l1.3-.52 1.93 3.34-1.11.86c.08.59.08 1.21 0 1.8ZM13.64 14.3a2.95 2.95 0 1 0 0-5.9 2.95 2.95 0 0 0 0 5.9Z"/></svg>';
 
-  const db = { projects: [], scripts: [], banned: [], keys: [], usage: { obfuscations: 0, limit: OBF_LIMIT }, selectedId: null, apiKey: '' };
+  const db = { projects: [], scripts: [], banned: [], keys: [], usage: { obfuscations: 0, limit: OBF_LIMIT }, selectedId: null, apiKey: '', role: '' };
   let view = 'projects';
   let editScriptId = null;
   let ctxId = null;
@@ -99,12 +99,28 @@
       return;
     }
     try {
-      await loadDashboard();
-      await loadKeys();
+      await loadRole();
+      if (db.role === 'user') {
+        clearData();
+      } else {
+        await loadDashboard();
+        await loadKeys();
+      }
     } catch (error) {
       toast(error.message);
     }
     renderAll();
+  }
+
+  async function loadRole() {
+    const me = await api('/api/auth/me');
+    db.role = me.user.role;
+  }
+
+  function clearData() {
+    db.projects = [];
+    db.scripts = [];
+    db.keys = [];
   }
 
   function renderAll() {
@@ -701,6 +717,42 @@
     $('apiToggle').textContent = show ? 'HIDE' : 'SHOW';
   }
 
+  async function checkSetup() {
+    try {
+      const response = await fetch('/api/health');
+      const data = await response.json();
+      const needed = !!data.needs_setup;
+      $('setupBlock').hidden = !needed;
+      return needed;
+    } catch {
+      return false;
+    }
+  }
+
+  async function createOwner(button) {
+    const name = $('setupName').value.trim();
+    if (!name) {
+      banner('accountBanner', 'Enter a username.', 'error');
+      $('setupName').focus();
+      return;
+    }
+    setBusy(button, true, 'CREATE OWNER');
+    try {
+      const data = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ username: name }) });
+      const token = data.key.token;
+      writeKey(token);
+      $('apiKey').value = token;
+      $('setupBlock').hidden = true;
+      setBusy(button, false, 'CREATE OWNER');
+      renderApiStatus();
+      banner('accountBanner', 'Owner created. The API key is shown once: ' + token + ' (copy it now)', 'ok');
+      await refresh();
+    } catch (error) {
+      setBusy(button, false, 'CREATE OWNER');
+      banner('accountBanner', error.message, 'error');
+    }
+  }
+
   async function saveApiKey(button) {
     const v = $('apiKey').value.trim();
     if (!TOKEN_RE.test(v)) {
@@ -712,8 +764,13 @@
     writeKey(v);
     setBusy(button, true, 'SAVE KEY');
     try {
-      await loadDashboard();
-      await loadKeys();
+      await loadRole();
+      if (db.role === 'user') {
+        clearData();
+      } else {
+        await loadDashboard();
+        await loadKeys();
+      }
       setBusy(button, false, 'SAVE KEY');
       renderApiStatus();
       banner('accountBanner', 'API key saved on this device.', 'ok');
@@ -804,6 +861,7 @@
   $('apiToggle').addEventListener('click', toggleApiVisibility);
   $('apiSave').addEventListener('click', (e) => saveApiKey(e.currentTarget));
   $('apiRemove').addEventListener('click', removeApiKey);
+  $('setupCreate').addEventListener('click', (e) => createOwner(e.currentTarget));
   $('clearAll').addEventListener('click', removeApiKey);
   $('keySearch').addEventListener('input', renderKeys);
 
@@ -912,8 +970,9 @@
   async function init() {
     db.apiKey = readKey();
     renderAll();
+    const needed = await checkSetup();
     await refresh();
-    if (!db.apiKey) openAccount();
+    if (needed || !db.apiKey) openAccount();
   }
 
   init();

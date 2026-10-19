@@ -256,6 +256,16 @@
           <button class="btn danger" id="apiRemove">REMOVE KEY</button>
         </div>
       </div>
+      <div class="block" id="setupBlock" hidden>
+        <p class="section-title">Create owner</p>
+        <p class="hint">No owner exists yet. Create the first owner account. The API key is shown once and saved to this browser.</p>
+        <div class="key-input-row">
+          <input id="setupName" class="search" type="text" autocomplete="off" spellcheck="false" placeholder="Username (letters, digits, _ . -, 2–40)" />
+        </div>
+        <div class="row-inline">
+          <button class="btn primary" id="setupCreate">CREATE OWNER</button>
+        </div>
+      </div>
       <div class="block">
         <p class="section-title">Data</p>
         <p class="hint">Projects, scripts and users are stored on the server. Signing out only removes the API key from this browser.</p>
