@@ -758,7 +758,8 @@ async function updateScript(request, env, auth, id, body) {
   const changed = name !== current.name || mode !== current.mode || policy !== current.key_policy || slug !== current.slug
     || opts.hwid !== current.hwid_lock || opts.silent !== current.silent || opts.heartbeat !== current.heartbeat
     || opts.lightweight !== current.lightweight || opts.secure !== current.secure_loader || digest !== current.sha256;
-  let objectKey = current.object_key;
+  const oldObjectKey = current.object_key;
+  let objectKey = oldObjectKey;
   if (newCode !== null) {
     objectKey = `scripts/${id}-${randomHex(6)}.lua`;
     await env.BUCKET.put(objectKey, newCode, { ...OBJECT_META, customMetadata: { scriptId: id, sha256: digest } });
@@ -770,10 +771,10 @@ async function updateScript(request, env, auth, id, body) {
       `UPDATE hosted_scripts SET object_key = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
     ).bind(objectKey, slug, name, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
   } catch (error) {
-    if (objectKey !== current.object_key) await purgeObjects(env, [objectKey]);
+    if (objectKey !== oldObjectKey) await purgeObjects(env, [objectKey]);
     throw error;
   }
-  if (objectKey !== current.object_key) await purgeObjects(env, [current.object_key]);
+  if (objectKey !== oldObjectKey) await purgeObjects(env, [oldObjectKey]);
   await audit(env, request, auth, 'script.update', id, 'ok');
   return json({ ok: true, script: scriptView(await getScriptRow(env, id)), raw_url: publicUrl(new URL(request.url).origin, slug) });
 }
