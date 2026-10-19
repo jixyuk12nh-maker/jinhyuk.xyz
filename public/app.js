@@ -102,6 +102,7 @@
       await loadRole();
       if (db.role === 'user') {
         clearData();
+        notifyUserRole();
       } else {
         await loadDashboard();
         await loadKeys();
@@ -123,6 +124,10 @@
     db.keys = [];
   }
 
+  function notifyUserRole() {
+    toast('This account has the user role. The dashboard is only available to admins and owners.');
+  }
+
   function renderAll() {
     renderChrome();
     renderTabs();
@@ -142,6 +147,7 @@
 
   function banner(id, text, kind) {
     const el = $(id);
+    if (!el) return;
     if (!text) {
       el.hidden = true;
       el.textContent = '';
@@ -773,9 +779,10 @@
       }
       setBusy(button, false, 'SAVE KEY');
       renderApiStatus();
-      banner('accountBanner', 'API key saved on this device.', 'ok');
-      toast('API key saved.');
       renderAll();
+      closeDialog();
+      if (db.role === 'user') notifyUserRole();
+      else toast('API key saved.');
     } catch (error) {
       writeKey(previous);
       setBusy(button, false, 'SAVE KEY');
@@ -806,6 +813,15 @@
       flash($('bannedCard'));
     }, 250);
   }
+
+  $('userList').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const row = e.target.closest('.project[data-action="add-user"]');
+    if (row && e.target === row) {
+      e.preventDefault();
+      openCreateKey(row.dataset.project);
+    }
+  });
 
   $('tabs').addEventListener('click', (e) => {
     const b = e.target.closest('[data-project]');
@@ -906,7 +922,7 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && openDialogId && !e.isComposing && e.target.tagName === 'INPUT') {
-      const submit = { pName: () => saveProject($('projectSave')), uLabel: () => saveKey($('addUserSave')), uReset: () => saveKey($('addUserSave')), apiKey: () => saveApiKey($('apiSave')) }[e.target.id];
+      const submit = { pName: () => saveProject($('projectSave')), uLabel: () => saveKey($('addUserSave')), uReset: () => saveKey($('addUserSave')), apiKey: () => saveApiKey($('apiSave')), setupName: () => createOwner($('setupCreate')) }[e.target.id];
       if (submit) { e.preventDefault(); submit(); }
       return;
     }
