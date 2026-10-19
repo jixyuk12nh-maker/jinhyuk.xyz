@@ -196,8 +196,11 @@ input[type=checkbox]:checked::before{transform:scale(1)}
 .key-info{flex:1 1 220px;min-width:0;display:grid;gap:4px}
 .key-title{font-size:14px;font-weight:700}
 .key-memo{color:#d1d5db;font-size:13px;line-height:18px;overflow-wrap:anywhere}
-.key-meta{color:#9ca3af;font-size:12px;font-weight:500;line-height:17px}
-.key-info code{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint);font:11px ui-monospace,Menlo,Consolas,monospace}
+.key-meta{color:var(--faint);font-size:12px;font-weight:600}
+.key-info code{display:block;overflow-wrap:anywhere;word-break:break-all;white-space:normal;color:var(--faint);font:11px ui-monospace,Menlo,Consolas,monospace}
+.side-icon{display:none;flex:none;place-items:center;width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,.08);color:var(--text)}
+.side-icon svg{width:20px;height:20px;fill:currentColor}
+body.show-icons .side-icon{display:grid}
 .key-actions{display:flex;flex-wrap:wrap;gap:6px}
 .key-empty{padding:18px;color:var(--muted);text-align:center;font-size:13px}
 

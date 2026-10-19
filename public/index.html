@@ -218,13 +218,23 @@
     </header>
     <div class="modal-body">
       <div class="banner" id="addUserBanner" role="status" hidden></div>
+      <label class="field">USERNAME
+        <input id="uUser" type="text" maxlength="40" autocomplete="off" placeholder="e.g. alice" />
+      </label>
+      <label class="field">ROLE
+        <select id="uRole">
+          <option value="user">User</option>
+          <option value="admin">Admin</option>
+          <option value="owner">Owner</option>
+        </select>
+      </label>
       <label class="field">LABEL (OPTIONAL)
         <input id="uLabel" type="text" maxlength="60" autocomplete="off" placeholder="e.g. laptop" />
       </label>
       <label class="field">EXPIRES IN (DAYS, OPTIONAL)
         <input id="uReset" type="number" min="1" max="3650" placeholder="Never" />
       </label>
-      <p class="hint">The key is shown once after creation. Leave the expiry empty for a key that never expires.</p>
+      <p class="hint">If the username already exists, its existing role is used. The full key stays visible in the list. Leave the expiry empty for a key that never expires.</p>
     </div>
   </section>
 </div>

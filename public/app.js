@@ -341,7 +341,7 @@
       info.dataset.project = p.id;
       info.setAttribute('role', 'button');
       info.tabIndex = 0;
-      info.innerHTML = '<div class="project-mark" aria-hidden="true"><span></span><span></span><span></span></div>';
+      info.innerHTML = '<span class="side-icon key">' + ICON_KEY + '</span><div class="project-mark" aria-hidden="true"><span></span><span></span><span></span></div>';
       const text = document.createElement('div');
       text.className = 'project-text';
       const h = document.createElement('h3');
@@ -405,7 +405,7 @@
     const p = project(ctxId);
     const keys = p ? projectKeys(p.id) : [];
     const q = $('keySearch').value.trim().toLowerCase();
-    const matches = keys.filter((k) => !q || [k.label, k.key_prefix].some((v) => (v || '').toLowerCase().includes(q)));
+    const matches = keys.filter((k) => !q || [k.username, k.label, k.key_prefix].some((v) => (v || '').toLowerCase().includes(q)));
     $('keyListCount').textContent = keys.length ? '(' + matches.length + ' / ' + keys.length + ')' : '';
     if (!keys.length) {
       list.innerHTML = '<div class="key-empty">No API keys yet. Use + ADD USER to create one.</div>';
@@ -423,12 +423,12 @@
       info.className = 'key-info';
       const title = document.createElement('div');
       title.className = 'key-title';
-      title.textContent = k.label || 'Untitled key';
+      title.textContent = (k.username || 'Unknown') + ' · ' + (k.user_role || 'user') + (k.label ? ' · ' + k.label : '');
       const meta = document.createElement('div');
       meta.className = 'key-meta';
       meta.textContent = 'Created ' + day(k.created_at) + ' · ' + (k.last_used_at ? 'Last used ' + day(k.last_used_at) : 'Never used') + ' · ' + (k.expires_at ? 'Expires ' + day(k.expires_at) : 'Never expires');
       const code = document.createElement('code');
-      code.textContent = k.key_prefix + '…';
+      code.textContent = k.token || (k.key_prefix + '… (full key not stored)');
       info.append(title, meta, code);
 
       const actions = document.createElement('div');
@@ -437,6 +437,15 @@
       status.className = 'pill ' + (k.revoked_at ? 'draft' : 'active');
       status.textContent = k.revoked_at ? 'REVOKED' : 'ACTIVE';
       actions.appendChild(status);
+      if (k.token) {
+        const c = document.createElement('button');
+        c.className = 'btn sm';
+        c.type = 'button';
+        c.textContent = 'COPY';
+        c.dataset.keyAction = 'copy';
+        c.dataset.id = k.id;
+        actions.appendChild(c);
+      }
       if (!k.revoked_at) {
         const b = document.createElement('button');
         b.className = 'btn sm danger';
@@ -651,21 +660,48 @@
     });
   }
 
+  const ICON_USER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Zm0 2c-4.2 0-7.5 2.1-7.5 4.7V21h15v-2.3c0-2.6-3.3-4.7-7.5-4.7Z"/></svg>';
+  const ICON_KEY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 2a6.5 6.5 0 0 0-6.2 8.4L2.3 17.4V22h4.6v-2.3h2.3v-2.3h2.3l2.6-2.6A6.5 6.5 0 1 0 15.5 2Zm1.2 5.2a1.6 1.6 0 1 1 0-3.2 1.6 1.6 0 0 1 0 3.2Z"/></svg>';
+
+  async function copyKey(id) {
+    const k = db.keys.find((x) => x.id === id);
+    if (!k || !k.token) {
+      toast('This key was created before full keys were stored.');
+      return;
+    }
+    toast((await copyText(k.token)) ? 'Key copied.' : 'Copy failed. Select the key and copy it manually.');
+  }
+
   function openCreateKey(projectId) {
     const p = project(projectId);
     if (!p) return;
     ctxId = p.id;
     $('addUserTitle').textContent = 'Create API Key For ' + p.name;
+    $('uUser').value = '';
     $('uLabel').value = '';
     $('uReset').value = '';
+    $('uRole').value = 'user';
+    $('uRole').querySelector('option[value="owner"]').hidden = db.role !== 'owner';
+    $('uRole').querySelector('option[value="admin"]').hidden = db.role !== 'owner';
     banner('addUserBanner', '');
-    openDialog('addUser', '#uLabel');
+    openDialog('addUser', '#uUser');
   }
 
   async function saveKey(button) {
     if (busy) return;
+    const username = $('uUser').value.trim();
+    const role = $('uRole').value;
     const label = $('uLabel').value.trim();
     const raw = $('uReset').value.trim();
+    if (!/^[A-Za-z0-9_.-]{2,40}$/.test(username)) {
+      banner('addUserBanner', 'Username must be 2 to 40 letters, numbers, _ . or -.', 'error');
+      $('uUser').focus();
+      return;
+    }
+    if (db.role !== 'owner' && role !== 'user') {
+      banner('addUserBanner', 'Admins can only create user keys.', 'error');
+      return;
+    }
     const days = raw === '' ? undefined : Number(raw);
     if (label.length > 60) {
       banner('addUserBanner', 'Label must be 60 characters or less.', 'error');
@@ -688,11 +724,11 @@
     busy = true;
     setBusy(button, true, '✓');
     try {
-      const body = { label, expires_in_days: days, project_id: p.id };
+      const body = { username, role, label, expires_in_days: days, project_id: p.id };
       const data = await api('/api/keys', { method: 'POST', body: JSON.stringify(body) });
       const token = data.key.token;
       const copied = await copyText(token);
-      banner('addUserBanner', (copied ? 'Copied. ' : '') + 'Save this key now. It will not be shown again: ' + token, 'ok');
+      banner('addUserBanner', (copied ? 'Copied. ' : '') + username + ' (' + data.key.role + ') key: ' + token, 'ok');
       toast('API key created.');
       await loadKeys();
       renderAll();
@@ -854,7 +890,7 @@
 
       const info = document.createElement('div');
       info.className = 'project';
-      info.innerHTML = '<div class="project-mark" aria-hidden="true"><span></span><span></span><span></span></div>';
+      info.innerHTML = '<span class="side-icon user">' + ICON_USER + '</span><div class="project-mark" aria-hidden="true"><span></span><span></span><span></span></div>';
       const text = document.createElement('div');
       text.className = 'project-text';
       const h = document.createElement('h3');
@@ -1065,7 +1101,10 @@
       case 'edit-script-keys': openScriptKeys(btn.dataset.project); break;
       case 'manage-script-keys': openScriptKeys(btn.dataset.project); break;
       case 'open-account': openAccount(); break;
-      case 'open-menu': openMenu(); break;
+      case 'open-menu':
+        document.body.classList.toggle('show-icons');
+        openMenu();
+        break;
       case 'close-menu': closeMenu(); break;
       case 'notify': toast('No notifications yet.'); break;
       case 'toast': toast(btn.dataset.msg); break;
@@ -1108,6 +1147,7 @@
   $('keyList').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-key-action]');
     if (b && b.dataset.keyAction === 'revoke') revokeKey(b.dataset.id);
+    if (b && b.dataset.keyAction === 'copy') copyKey(b.dataset.id);
   });
 
   $('uploadList').addEventListener('click', (e) => {
