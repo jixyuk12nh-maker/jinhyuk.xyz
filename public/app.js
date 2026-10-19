@@ -5,7 +5,7 @@
   const root = document.documentElement;
   const clamp = (v) => Math.min(Math.max(v, 0), 1);
   const KEY_PLACEHOLDER = '여기에_스크립트_키';
-  const DEFAULT_OPTS = { free: true, silent: false, heartbeat: true, light: false, secure: true };
+  const DEFAULT_OPTS = { free: true, silent: false, heartbeat: true, light: false, secure: true, hwid: false };
   const SCRIPT_LIMIT = 18;
   const OBF_LIMIT = 3000;
   const KEY_LIMIT = 10000;
@@ -13,7 +13,7 @@
   const TOKEN_RE = /^tmk_[A-Za-z0-9_-]{20,}$/;
   const GEAR = '<svg viewBox="0 0 24 24" aria-hidden="true" width="18" height="18" fill="currentColor"><path d="m19.42 13.1 1.11.86-1.93 3.34-1.3-.52c-.47.35-.99.65-1.55.87l-.19 1.38h-3.85l-.19-1.38c-.56-.22-1.08-.52-1.55-.87l-1.3.52-1.93-3.34 1.11-.86a6.96 6.96 0 0 1 0-1.8l-1.11-.86L8.67 7.1l1.3.52c.47-.35.99-.65 1.55-.87l.19-1.38h3.85l.19 1.38c.56.22 1.08.52 1.55.87l1.3-.52 1.93 3.34-1.11.86c.08.59.08 1.21 0 1.8ZM13.64 14.3a2.95 2.95 0 1 0 0-5.9 2.95 2.95 0 0 0 0 5.9Z"/></svg>';
 
-  const db = { projects: [], scripts: [], banned: [], keys: [], usage: { obfuscations: 0, limit: OBF_LIMIT }, selectedId: null, apiKey: '', role: '' };
+  const db = { projects: [], scripts: [], banned: [], keys: [], scriptKeys: [], usage: { obfuscations: 0, limit: OBF_LIMIT }, selectedId: null, apiKey: '', role: '' };
   let view = 'projects';
   let editScriptId = null;
   let ctxId = null;
@@ -31,7 +31,9 @@
     script: 'scriptModal',
     addUser: 'addUserModal',
     keys: 'keysModal',
-    account: 'accountModal'
+    account: 'accountModal',
+    issueKey: 'issueKeyModal',
+    scriptKeys: 'scriptKeysModal'
   };
 
   const fmtSize = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
@@ -86,7 +88,13 @@
       const data = await api('/api/keys');
       db.keys = data.keys || [];
     } catch {
-      db.keys = [];
+      db.keys = []; db.scriptKeys = [];
+    }
+    try {
+      const data = await api('/api/script-keys');
+      db.scriptKeys = data.keys || [];
+    } catch {
+      db.scriptKeys = [];
     }
   }
 
@@ -94,7 +102,7 @@
     if (!db.apiKey) {
       db.projects = [];
       db.scripts = [];
-      db.keys = [];
+      db.keys = []; db.scriptKeys = [];
       renderAll();
       return;
     }
@@ -121,7 +129,7 @@
   function clearData() {
     db.projects = [];
     db.scripts = [];
-    db.keys = [];
+    db.keys = []; db.scriptKeys = [];
   }
 
   function notifyUserRole() {
@@ -133,8 +141,10 @@
     renderTabs();
     renderProjects();
     renderUsers();
+    renderScriptKeyView();
     renderMetrics();
     if (openDialogId === 'keys') renderKeys();
+    if (openDialogId === 'scriptKeys') renderScriptKeys();
   }
 
   function toast(msg) {
@@ -240,17 +250,22 @@
   }
 
   function renderChrome() {
+    const keys = view === 'script-keys';
     const users = view === 'users';
-    $('viewProjects').classList.toggle('active', !users);
+    $('viewProjects').classList.toggle('active', view === 'projects');
     $('viewUsers').classList.toggle('active', users);
-    $('metrics').className = 'metrics ' + (users ? 'is-users' : 'is-projects');
-    const label = users ? 'API Keys' : 'Projects';
+    $('viewScriptKeys').classList.toggle('active', keys);
+    $('metrics').className = 'metrics ' + (users ? 'is-users' : keys ? 'is-keys' : 'is-projects');
+    const label = users ? 'API Keys' : keys ? 'Users' : 'Projects';
     $('crumb').textContent = label;
     $('pageTitle').textContent = label;
     document.title = 'Luarmor — ' + label;
     $('drawer').querySelectorAll('.nav-item[data-nav]').forEach((b) => {
       b.classList.toggle('is-active', b.dataset.nav === view);
     });
+    try {
+      if (location.hash.slice(1) !== view) history.replaceState(null, '', '#' + view);
+    } catch {}
   }
 
   function renderTabs() {
@@ -365,10 +380,20 @@
     $('obfCount').textContent = obf;
     $('obfMeta').textContent = obf + '/' + OBF_LIMIT;
     setBar($('obfBar'), obf / OBF_LIMIT * 100);
-    const active = activeKeys().length;
-    $('userCount').textContent = active;
-    $('userMeta').textContent = active + '/' + KEY_LIMIT;
-    setBar($('userBar'), active / KEY_LIMIT * 100);
+    if (view === 'script-keys') {
+      const list = p ? projectScriptKeys(p.id) : [];
+      const live = list.filter((k) => k.status === 'active').length;
+      $('userLabel').textContent = 'Active Script Keys';
+      $('userCount').textContent = live;
+      $('userMeta').textContent = live + '/' + list.length + ' issued';
+      setBar($('userBar'), list.length ? live / list.length * 100 : 0);
+    } else {
+      const active = activeKeys().length;
+      $('userLabel').textContent = 'Total Users';
+      $('userCount').textContent = active;
+      $('userMeta').textContent = active + '/' + KEY_LIMIT;
+      setBar($('userBar'), active / KEY_LIMIT * 100);
+    }
     const banned = $('bannedCard');
     banned.querySelector('.metric-copy strong').textContent = db.banned.length;
     banned.querySelector('.blacklist').innerHTML = 'There are <strong>' + db.banned.length + '</strong> blacklisted IPs';
@@ -509,7 +534,7 @@
     $('scriptName').value = s ? s.name : '';
     $('scriptCode').value = '';
     const opts = s
-      ? { free: s.mode === 'keyless', silent: !!s.silent, heartbeat: !!s.heartbeat, light: !!s.lightweight, secure: !!s.secure_loader }
+      ? { free: s.mode === 'keyless', silent: !!s.silent, heartbeat: !!s.heartbeat, light: !!s.lightweight, secure: !!s.secure_loader, hwid: !!s.hwid_lock }
       : { ...DEFAULT_OPTS };
     $('scriptModal').querySelectorAll('[data-opt]').forEach((b) => { b.checked = !!opts[b.dataset.opt]; });
     renderFiles();
@@ -547,7 +572,8 @@
       silent: opts.silent,
       heartbeat: opts.heartbeat,
       lightweight: opts.light,
-      secure_loader: opts.secure
+      secure_loader: opts.secure,
+      hwid_lock: opts.hwid
     };
     busy = true;
     setBusy(button, true, 'SAVE SCRIPT');
@@ -800,10 +826,199 @@
     $('apiKey').value = '';
     db.projects = [];
     db.scripts = [];
-    db.keys = [];
+    db.keys = []; db.scriptKeys = [];
     renderAll();
     renderApiStatus();
     banner('accountBanner', 'API key removed.', 'ok');
+  }
+
+  const VIEWS = ['projects', 'users', 'script-keys'];
+  const viewFromHash = () => {
+    const h = location.hash.slice(1);
+    return VIEWS.includes(h) ? h : 'projects';
+  };
+  const projectScriptKeys = (id) => {
+    const ids = new Set(projectScripts(id).map((s) => s.id));
+    return db.scriptKeys.filter((k) => ids.has(k.script_id));
+  };
+  const projectKeyScripts = (id) => projectScripts(id).filter((s) => s.mode === 'key');
+
+  function renderScriptKeyView() {
+    const list = $('scriptKeyProjectList');
+    list.textContent = '';
+    $('scriptKeysEmpty').hidden = db.projects.length > 0;
+    db.projects.forEach((p) => {
+      const live = projectScriptKeys(p.id).filter((k) => k.status === 'active').length;
+      const row = document.createElement('article');
+      row.className = 'user-row';
+
+      const info = document.createElement('div');
+      info.className = 'project';
+      info.innerHTML = '<div class="project-mark" aria-hidden="true"><span></span><span></span><span></span></div>';
+      const text = document.createElement('div');
+      text.className = 'project-text';
+      const h = document.createElement('h3');
+      h.textContent = p.name;
+      const sub = document.createElement('p');
+      sub.textContent = countLabel(live, 'active key') + ' · ' + countLabel(projectKeyScripts(p.id).length, 'key script');
+      text.append(h, sub);
+      info.appendChild(text);
+
+      const actions = document.createElement('div');
+      actions.className = 'panel-actions';
+      actions.innerHTML =
+        '<button class="btn primary" data-action="add-script-key" data-project="' + p.id + '">+ ADD KEY</button>' +
+        '<button class="btn" data-action="edit-script-keys" data-project="' + p.id + '">EDIT KEYS</button>' +
+        '<button class="btn icon" aria-label="Manage script keys" data-action="manage-script-keys" data-project="' + p.id + '">' + GEAR + '</button>';
+
+      row.append(info, actions);
+      list.appendChild(row);
+    });
+  }
+
+  function openIssueKey(projectId) {
+    const p = project(projectId);
+    if (!p) return;
+    const scripts = projectKeyScripts(p.id);
+    if (!scripts.length) {
+      toast('This project has no key-mode scripts. Set a script to key mode first.');
+      return;
+    }
+    ctxId = p.id;
+    $('issueKeyTitle').textContent = 'Create Script Key For ' + p.name;
+    const sel = $('skScript');
+    sel.textContent = '';
+    scripts.forEach((s) => {
+      const o = document.createElement('option');
+      o.value = s.id;
+      o.textContent = s.name + ' (' + s.slug + ')';
+      sel.appendChild(o);
+    });
+    $('skDays').value = '';
+    banner('issueKeyBanner', '');
+    openDialog('issueKey', '#skScript');
+  }
+
+  async function saveScriptKey(button) {
+    if (busy) return;
+    const scriptId = $('skScript').value;
+    const raw = $('skDays').value.trim();
+    const days = raw === '' ? undefined : Number(raw);
+    if (!scriptId) {
+      banner('issueKeyBanner', 'Select a script first.', 'error');
+      return;
+    }
+    if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > 3650)) {
+      banner('issueKeyBanner', 'Expiry must be 1 to 3650 days, or empty for no expiry.', 'error');
+      $('skDays').focus();
+      return;
+    }
+    busy = true;
+    setBusy(button, true, '✓');
+    try {
+      const body = days === undefined ? {} : { expires_in_days: days };
+      const data = await api(`/api/scripts/${scriptId}/keys`, { method: 'POST', body: JSON.stringify(body) });
+      const token = data.key.token;
+      const copied = await copyText(token);
+      banner('issueKeyBanner', (copied ? 'Copied. ' : '') + 'Save this key now. It will not be shown again: ' + token, 'ok');
+      toast('Script key created.');
+      await loadKeys();
+      renderAll();
+    } catch (error) {
+      banner('issueKeyBanner', error.message, 'error');
+    } finally {
+      busy = false;
+      setBusy(button, false, '✓');
+    }
+  }
+
+  function openScriptKeys(projectId) {
+    const p = project(projectId);
+    if (!p) return;
+    ctxId = p.id;
+    $('scriptKeysModalTitle').textContent = 'Script Keys Of ' + p.name;
+    $('scriptKeySearch').value = '';
+    renderScriptKeys();
+    openDialog('scriptKeys', '#scriptKeySearch');
+  }
+
+  function renderScriptKeys() {
+    const list = $('scriptKeyList');
+    list.textContent = '';
+    const p = project(ctxId);
+    const keys = p ? projectScriptKeys(p.id) : [];
+    const q = $('scriptKeySearch').value.trim().toLowerCase();
+    const matches = keys.filter((k) => !q || [k.slug, k.key_prefix, k.username].some((v) => (v || '').toLowerCase().includes(q)));
+    $('scriptKeyCount').textContent = keys.length ? '(' + matches.length + ' / ' + keys.length + ')' : '';
+    if (!keys.length) {
+      list.innerHTML = '<div class="key-empty">No script keys yet. Use + ADD KEY to create one.</div>';
+      return;
+    }
+    if (!matches.length) {
+      list.innerHTML = '<div class="key-empty">No keys match your search.</div>';
+      return;
+    }
+    const mk = (text, action, id) => {
+      const b = document.createElement('button');
+      b.className = 'btn sm' + (action === 'revoke-script' ? ' danger' : '');
+      b.type = 'button';
+      b.textContent = text;
+      b.dataset.keyAction = action;
+      b.dataset.id = id;
+      return b;
+    };
+    matches.forEach((k) => {
+      const row = document.createElement('div');
+      row.className = 'key-row';
+
+      const info = document.createElement('div');
+      info.className = 'key-info';
+      const title = document.createElement('div');
+      title.className = 'key-title';
+      title.textContent = k.slug;
+      const meta = document.createElement('div');
+      meta.className = 'key-meta';
+      meta.textContent = 'User ' + k.username + ' · Created ' + day(k.created_at) + ' · ' + (k.last_used_at ? 'Last used ' + day(k.last_used_at) : 'Never used') + ' · ' + (k.expires_at ? 'Expires ' + day(k.expires_at) : 'Never expires') + (k.hwid_bound ? ' · HWID bound' : '');
+      const code = document.createElement('code');
+      code.textContent = k.key_prefix + '…';
+      info.append(title, meta, code);
+
+      const actions = document.createElement('div');
+      actions.className = 'key-actions';
+      const status = document.createElement('span');
+      status.className = 'pill ' + (k.status === 'active' ? 'active' : 'draft');
+      status.textContent = String(k.status).toUpperCase();
+      actions.appendChild(status);
+      if (k.status === 'active') actions.appendChild(mk('SUSPEND', 'suspend', k.id));
+      if (k.status === 'suspended') actions.appendChild(mk('RESUME', 'resume', k.id));
+      if (k.hwid_bound) actions.appendChild(mk('RESET HWID', 'reset-hwid', k.id));
+      if (k.status !== 'revoked') actions.appendChild(mk('REVOKE', 'revoke-script', k.id));
+
+      row.append(info, actions);
+      list.appendChild(row);
+    });
+  }
+
+  async function scriptKeyAction(action, id) {
+    const k = db.scriptKeys.find((x) => x.id === id);
+    if (!k) return;
+    try {
+      if (action === 'suspend' || action === 'resume') {
+        await api(`/api/script-keys/${id}`, { method: 'PATCH', body: JSON.stringify({ status: action === 'suspend' ? 'suspended' : 'active' }) });
+        toast(action === 'suspend' ? 'Script key suspended.' : 'Script key resumed.');
+      } else if (action === 'reset-hwid') {
+        await api(`/api/script-keys/${id}`, { method: 'PATCH', body: JSON.stringify({ reset_hwid: true }) });
+        toast('HWID reset.');
+      } else if (action === 'revoke-script') {
+        if (!confirm('Revoke this script key? It cannot be restored.')) return;
+        await api(`/api/script-keys/${id}`, { method: 'DELETE' });
+        toast('Script key revoked.');
+      }
+      await loadKeys();
+      renderAll();
+    } catch (error) {
+      toast(error.message);
+    }
   }
 
   function goBanned() {
@@ -846,6 +1061,9 @@
       case 'add-user': openCreateKey(btn.dataset.project || ctxId || db.selectedId); break;
       case 'edit-users': openKeys(btn.dataset.project); break;
       case 'manage-users': openKeys(btn.dataset.project); break;
+      case 'add-script-key': openIssueKey(btn.dataset.project); break;
+      case 'edit-script-keys': openScriptKeys(btn.dataset.project); break;
+      case 'manage-script-keys': openScriptKeys(btn.dataset.project); break;
       case 'open-account': openAccount(); break;
       case 'open-menu': openMenu(); break;
       case 'close-menu': closeMenu(); break;
@@ -859,7 +1077,7 @@
     if (!item) return;
     const target = item.dataset.nav;
     closeMenu();
-    if (target === 'projects' || target === 'users') {
+    if (target === 'projects' || target === 'users' || target === 'script-keys') {
       showView(target);
     } else if (target === 'banned') {
       goBanned();
@@ -880,6 +1098,12 @@
   $('setupCreate').addEventListener('click', (e) => createOwner(e.currentTarget));
   $('clearAll').addEventListener('click', removeApiKey);
   $('keySearch').addEventListener('input', renderKeys);
+  $('issueKeySave').addEventListener('click', (e) => saveScriptKey(e.currentTarget));
+  $('scriptKeySearch').addEventListener('input', renderScriptKeys);
+  $('scriptKeyList').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-key-action]');
+    if (b) scriptKeyAction(b.dataset.keyAction, b.dataset.id);
+  });
 
   $('keyList').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-key-action]');
@@ -922,7 +1146,7 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && openDialogId && !e.isComposing && e.target.tagName === 'INPUT') {
-      const submit = { pName: () => saveProject($('projectSave')), uLabel: () => saveKey($('addUserSave')), uReset: () => saveKey($('addUserSave')), apiKey: () => saveApiKey($('apiSave')), setupName: () => createOwner($('setupCreate')) }[e.target.id];
+      const submit = { pName: () => saveProject($('projectSave')), uLabel: () => saveKey($('addUserSave')), uReset: () => saveKey($('addUserSave')), apiKey: () => saveApiKey($('apiSave')), setupName: () => createOwner($('setupCreate')), skDays: () => saveScriptKey($('issueKeySave')) }[e.target.id];
       if (submit) { e.preventDefault(); submit(); }
       return;
     }
@@ -985,6 +1209,7 @@
 
   async function init() {
     db.apiKey = readKey();
+    view = viewFromHash();
     renderAll();
     const needed = await checkSetup();
     await refresh();
