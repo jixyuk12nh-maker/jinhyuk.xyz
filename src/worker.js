@@ -413,12 +413,13 @@ async function deleteProject(request, env, auth, id) {
   const current = await env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(id).first();
   if (!current) return fail(404, 'Project not found.');
   const { results: scripts = [] } = await env.DB.prepare('SELECT id, object_key FROM hosted_scripts WHERE project_id = ?').bind(id).all();
+  const orphanKeys = [];
   for (const script of scripts) {
     const { results: files = [] } = await env.DB.prepare('SELECT object_key FROM script_files WHERE script_id = ?').bind(script.id).all();
-    for (const file of files) await env.BUCKET.delete(file.object_key);
-    await env.BUCKET.delete(script.object_key);
+    orphanKeys.push(...files.map((f) => f.object_key), script.object_key);
   }
   await env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(id).run();
+  await purgeObjects(env, orphanKeys);
   await audit(env, request, auth, 'project.delete', id, 'ok');
   return json({ ok: true, id });
 }
@@ -481,7 +482,9 @@ async function createLicenseUsers(request, env, auth, projectId, body) {
         await env.DB.prepare('INSERT INTO license_users (id, project_id, license_key, discord_id, memo, reset_days) VALUES (?,?,?,?,?,?)')
           .bind(id, projectId, key, fields.discord, fields.memo, fields.resetDays).run();
         row = await env.DB.prepare('SELECT * FROM license_users WHERE id = ?').bind(id).first();
-      } catch {}
+      } catch (error) {
+        if (!String(error?.message || error).includes('UNIQUE')) throw error;
+      }
     }
     if (!row) return fail(500, 'Could not generate unique keys. Try again.');
     created.push(licenseView(row));
@@ -755,25 +758,44 @@ async function updateScript(request, env, auth, id, body) {
   const changed = name !== current.name || mode !== current.mode || policy !== current.key_policy || slug !== current.slug
     || opts.hwid !== current.hwid_lock || opts.silent !== current.silent || opts.heartbeat !== current.heartbeat
     || opts.lightweight !== current.lightweight || opts.secure !== current.secure_loader || digest !== current.sha256;
-  if (newCode !== null) await env.BUCKET.put(current.object_key, newCode, { ...OBJECT_META, customMetadata: { scriptId: id, sha256: digest } });
+  let objectKey = current.object_key;
+  if (newCode !== null) {
+    objectKey = `scripts/${id}-${randomHex(6)}.lua`;
+    await env.BUCKET.put(objectKey, newCode, { ...OBJECT_META, customMetadata: { scriptId: id, sha256: digest } });
+  }
   const version = changed ? bumpVersion(current.version) : current.version;
   const status = changed || current.status !== 'ACTIVE' ? 'ACTIVE' : current.status;
-  await env.DB.prepare(
-    `UPDATE hosted_scripts SET slug = ?, name = ?, byte_size = ?, sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
-  ).bind(slug, name, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
+  try {
+    await env.DB.prepare(
+      `UPDATE hosted_scripts SET object_key = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
+    ).bind(objectKey, slug, name, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
+  } catch (error) {
+    if (objectKey !== current.object_key) await purgeObjects(env, [objectKey]);
+    throw error;
+  }
+  if (objectKey !== current.object_key) await purgeObjects(env, [current.object_key]);
   await audit(env, request, auth, 'script.update', id, 'ok');
   return json({ ok: true, script: scriptView(await getScriptRow(env, id)), raw_url: publicUrl(new URL(request.url).origin, slug) });
+}
+
+async function purgeObjects(env, keys) {
+  for (const key of keys) {
+    try {
+      await env.BUCKET.delete(key);
+    } catch (error) {
+      console.error('R2 cleanup failed:', key, error);
+    }
+  }
 }
 
 async function deleteScript(request, env, auth, id) {
   const current = await env.DB.prepare('SELECT object_key FROM hosted_scripts WHERE id = ?').bind(id).first();
   if (!current) return fail(404, 'Script not found.');
   const { results: files = [] } = await env.DB.prepare('SELECT object_key FROM script_files WHERE script_id = ?').bind(id).all();
-  for (const file of files) await env.BUCKET.delete(file.object_key);
-  await env.BUCKET.delete(current.object_key);
   await env.DB.prepare('DELETE FROM script_files WHERE script_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM script_keys WHERE script_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM hosted_scripts WHERE id = ?').bind(id).run();
+  await purgeObjects(env, [...files.map((f) => f.object_key), current.object_key]);
   await audit(env, request, auth, 'script.delete', id, 'ok');
   return json({ ok: true, id });
 }
