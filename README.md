@@ -21,7 +21,7 @@ API 키는 앱사이트 로그인용이며, 프로젝트별로 Users 탭에서 �
   script_key = "여기에_스크립트_키"
   loadstring(game:HttpGet("https://jinhyuk.xyz/<슬러그>"))()
   ```
-- HWID 잠금: 키 모드 스크립트에서 켜면 키 1개가 처음 실행된 기기 1대에만 연결됩니다. 기기 값은 `RbxAnalyticsService:GetClientId()`입니다.
+- HWID 잠금: 키 모드 스크립트에서 켜면 키 1개마다 처음 실행된 기기 1대에만 연결됩니다. 같은 사용자가 키를 여러 개 받으면 기기마다 다른 키를 쓰면 됩니다. 기기 값은 `RbxAnalyticsService:GetClientId()`입니다.
 - 소유자 로더: `loader.lua`처럼 `.lua`로 끝나는 슬러그로 키리스 스크립트를 만들면 `https://jinhyuk.xyz/loader.lua`로 받을 수 있습니다.
 - 한글 슬러그는 입력한 그대로 주소가 됩니다. Roblox 실행기에서 한글 주소가 열리는지는 실제 테스트가 필요합니다.
 
@@ -49,7 +49,7 @@ API 키는 앱사이트 로그인용이며, 프로젝트별로 Users 탭에서 �
 - `GET /api/scripts`: 스크립트 목록
 - `POST /api/scripts`, `PATCH /api/scripts/:id`, `DELETE /api/scripts/:id`: owner, admin
 - `POST /api/execute`: 키리스 스크립트 원문 반환 (API 키 필요)
-- `POST /api/scripts/:id/keys`: 키 모드 스크립트의 키 발급 (로그인한 누구나, 사용자당 활성 키 1개)
+- `POST /api/scripts/:id/keys`: 키 모드 스크립트의 키 발급 (로그인한 누구나, 같은 스크립트의 키를 여러 개 발급 가능; 키마다 HWID가 따로 묶임)
 - `GET /api/script-keys`: 본인 키 목록 (owner, admin은 전체)
 - `PATCH /api/script-keys/:id`: 정지·재개, HWID 초기화 `{"reset_hwid": true}` (owner, admin)
 - `DELETE /api/script-keys/:id`: 폐기 (본인 또는 owner, admin)
