@@ -104,9 +104,8 @@ export default {
     const method = request.method;
     if (method === 'OPTIONS') return new Response(null, { status: 204, headers: { allow: 'GET,POST,PATCH,DELETE,OPTIONS' } });
     try {
-      if (path === '/api/health' && method === 'GET') {
-        return json({ ok: true, service: 'tm-lua-host', database: !!env.DB, storage: !!env.BUCKET });
-      }
+      if (path === '/api/health' && method === 'GET') return health(env);
+      if (path === '/api/auth/signup' && method === 'POST') return signup(request, env, await readBody(request));
       if (path === '/api/key-run' && method === 'POST') return keyRun(request, env, await readBody(request));
       if (path.startsWith('/api/')) return await handleApi(request, env, url);
       const rawId = path.match(/^\/raw\/([A-Za-z0-9_-]{8,40})$/);
@@ -120,6 +119,39 @@ export default {
     }
   }
 };
+
+async function health(env) {
+  let needsSetup = null;
+  try {
+    const owner = await env.DB.prepare("SELECT id FROM api_users WHERE role = 'owner' LIMIT 1").first();
+    needsSetup = !owner;
+  } catch {}
+  return json({ ok: true, service: 'tm-lua-host', database: !!env.DB, storage: !!env.BUCKET, needs_setup: needsSetup });
+}
+
+async function signup(request, env, body) {
+  const username = safeUsername(body?.username);
+  if (!username) return fail(400, '사용자 이름은 영문, 숫자, _, -, . 조합 2~40자입니다.');
+  const id = randomHex(12);
+  const token = newSecret('tmk_');
+  const keyId = randomHex(12);
+  let created = false;
+  try {
+    const result = await env.DB.prepare(
+      `INSERT INTO api_users (id, username, role, status, created_by)
+       SELECT ?, ?, 'owner', 'active', ? WHERE NOT EXISTS (SELECT 1 FROM api_users WHERE role = 'owner')`
+    ).bind(id, username, id).run();
+    if (!result.meta?.changes) return fail(403, '소유자가 이미 있습니다. 관리자에게 API 키를 요청하세요.');
+    created = true;
+    await env.DB.prepare('INSERT INTO api_keys (id, user_id, key_hash, key_prefix, created_by) VALUES (?,?,?,?,?)')
+      .bind(keyId, id, await sha256Hex(token), token.slice(0, 12), id).run();
+  } catch (error) {
+    if (created) await env.DB.prepare('DELETE FROM api_users WHERE id = ?').bind(id).run().catch(() => {});
+    return fail(409, '이미 쓰는 사용자 이름이거나 가입할 수 없습니다.');
+  }
+  await audit(env, request, { user: { id }, keyId }, 'auth.signup', id, 'ok');
+  return json({ ok: true, user: { id, username, role: 'owner' }, key: { id: keyId, token } }, 201);
+}
 
 async function handleApi(request, env, url) {
   const path = url.pathname;
@@ -173,6 +205,21 @@ async function handleApi(request, env, url) {
   if (scriptKeyMatch && method === 'PATCH') return updateScriptKey(request, env, auth, scriptKeyMatch[1], await readBody(request));
   if (scriptKeyMatch && method === 'DELETE') return revokeScriptKey(request, env, auth, scriptKeyMatch[1]);
 
+  if (path === '/api/users' && method === 'GET') {
+    if (!manager) return forbidden();
+    const where = actor.role === 'owner' ? '' : "WHERE role = 'user'";
+    const { results = [] } = await env.DB.prepare(`SELECT id, username, role, status, created_at FROM api_users ${where} ORDER BY created_at DESC LIMIT 500`).all();
+    return json({ ok: true, users: results });
+  }
+  if (path === '/api/keys' && method === 'GET') {
+    if (!manager) return forbidden();
+    const where = actor.role === 'owner' ? '' : "WHERE u.role = 'user'";
+    const { results = [] } = await env.DB.prepare(
+      `SELECT k.id, k.user_id, u.username, u.role AS user_role, k.key_prefix, k.expires_at, k.revoked_at, k.created_at, k.last_used_at
+       FROM api_keys k JOIN api_users u ON u.id = k.user_id ${where} ORDER BY k.created_at DESC LIMIT 500`
+    ).all();
+    return json({ ok: true, keys: results });
+  }
   if (path === '/api/keys' && method === 'POST') {
     if (!manager) return forbidden();
     return issueKey(request, env, auth, await readBody(request));
