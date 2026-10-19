@@ -850,8 +850,6 @@ async function issueScriptKey(request, env, auth, scriptId, body) {
     if (found.status !== 'active') return fail(409, 'User is blocked.');
     holderId = found.id;
   }
-  const exists = await env.DB.prepare("SELECT id FROM script_keys WHERE script_id = ? AND user_id = ? AND status <> 'revoked'").bind(script.id, holderId).first();
-  if (exists) return fail(409, 'An active key already exists. Revoke it before issuing a new one.');
   const expiry = expiresFromDays(body?.expires_in_days);
   if (!expiry.ok) return fail(400, 'expires_in_days must be between 1 and 3650.');
   const token = newSecret('skey_');
