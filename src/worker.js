@@ -167,8 +167,8 @@ async function signup(request, env, body) {
     ).bind(id, username, id).run();
     if (!result.meta?.changes) return fail(403, '소유자가 이미 있습니다. 관리자에게 API 키를 요청하세요.');
     created = true;
-    await env.DB.prepare('INSERT INTO api_keys (id, user_id, key_hash, key_prefix, created_by) VALUES (?,?,?,?,?)')
-      .bind(keyId, id, await sha256Hex(token), token.slice(0, 12), id).run();
+    await env.DB.prepare('INSERT INTO api_keys (id, user_id, key_hash, key_prefix, created_by, token) VALUES (?,?,?,?,?,?)')
+      .bind(keyId, id, await sha256Hex(token), token.slice(0, 12), id, token).run();
   } catch (error) {
     if (created) await env.DB.prepare('DELETE FROM api_users WHERE id = ?').bind(id).run().catch(() => {});
     return fail(409, '이미 쓰는 사용자 이름이거나 가입할 수 없습니다.');
@@ -324,7 +324,7 @@ async function handleApi(request, env, url) {
     if (!manager) return forbidden();
     const where = actor.role === 'owner' ? '' : "WHERE u.role = 'user'";
     const { results = [] } = await env.DB.prepare(
-      `SELECT k.id, k.user_id, k.label, k.project_id, u.username, u.role AS user_role, k.key_prefix, k.expires_at, k.revoked_at, k.created_at, k.last_used_at
+      `SELECT k.id, k.user_id, k.label, k.project_id, u.username, u.role AS user_role, k.key_prefix, k.token, k.expires_at, k.revoked_at, k.created_at, k.last_used_at
        FROM api_keys k JOIN api_users u ON u.id = k.user_id ${where} ORDER BY k.created_at DESC LIMIT 500`
     ).all();
     return json({ ok: true, keys: results });
@@ -934,8 +934,8 @@ async function issueKey(request, env, auth, body) {
   if (projectId && !(await env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(projectId).first())) return fail(404, 'Project not found.');
   const key = newSecret('tmk_');
   const keyId = randomHex(12);
-  await env.DB.prepare('INSERT INTO api_keys (id, user_id, key_hash, key_prefix, created_by, expires_at, label, project_id) VALUES (?,?,?,?,?,?,?,?)')
-    .bind(keyId, target.id, await sha256Hex(key), key.slice(0, 12), actor.id, expiry.expiresAt, label, projectId).run();
+  await env.DB.prepare('INSERT INTO api_keys (id, user_id, key_hash, key_prefix, created_by, expires_at, label, project_id, token) VALUES (?,?,?,?,?,?,?,?,?)')
+    .bind(keyId, target.id, await sha256Hex(key), key.slice(0, 12), actor.id, expiry.expiresAt, label, projectId, key).run();
   await audit(env, request, auth, 'key.issue', keyId, 'ok');
   return json({ ok: true, key: { id: keyId, user_id: target.id, username: target.username, role: target.role, expires_at: expiry.expiresAt, token: key } }, 201);
 }
