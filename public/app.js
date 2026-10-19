@@ -1,5 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const tokenEl = $('token'), nameEl = $('name'), slugEl = $('slug'), codeEl = $('code'), fileEl = $('file'), listEl = $('scripts'), noticeEl = $('notice'), modeEl = $('mode'), hwidEl = $('hwid'), keysEl = $('my-keys'), issuedEl = $('key-issued');
+const signupEl = $('signup'), signupResultEl = $('signup-result');
+const adminEl = $('admin'), newUserEl = $('new-user'), newRoleEl = $('new-role'), newDaysEl = $('new-days'), apiIssuedEl = $('api-issued'), usersEl = $('users-list'), apiKeysEl = $('api-keys-list');
 const scripts = new Map();
 let me = null;
 let issued = null;
@@ -7,7 +9,12 @@ const bytes = (n) => n < 1024 ? `${n} bytes` : `${(n / 1024).toFixed(1)} KB`;
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const isManager = () => !!me && (me.role === 'owner' || me.role === 'admin');
 const loaderFor = (slug, token) => `${token ? `script_key = "${token}"\n` : ''}loadstring(game:HttpGet("${location.origin}/${slug}"))()`;
+const tokenBox = (title, token) => `<div class="key-issued-box"><strong>${esc(title)}</strong><pre><code>${esc(token)}</code></pre><button class="secondary" data-copy="${esc(token)}">키 복사</button></div>`;
 function notify(message, error = false) { noticeEl.textContent = message; noticeEl.classList.toggle('error', error); }
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); notify('복사했습니다.'); }
+  catch { notify(text); }
+}
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body) headers.set('content-type', 'application/json');
@@ -17,6 +24,19 @@ async function api(path, options = {}) {
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data;
 }
+
+async function checkSetup() {
+  try {
+    const health = await (await fetch('/api/health')).json();
+    signupEl.hidden = health.needs_setup !== true;
+  } catch { signupEl.hidden = true; }
+}
+async function loadMe() {
+  me = null;
+  if (!tokenEl.value.trim()) return;
+  me = (await api('/api/auth/me')).user;
+}
+
 function render(list) {
   scripts.clear();
   list.forEach((s) => scripts.set(s.id, s));
@@ -28,6 +48,7 @@ async function refresh() {
   try { const data = await api('/api/scripts'); render(data.scripts || []); }
   catch (error) { listEl.innerHTML = `<div class="empty">${esc(error.message)}<br>API 키와 D1 마이그레이션을 확인하세요.</div>`; }
 }
+
 function renderIssued() {
   if (!issued) { issuedEl.innerHTML = ''; return; }
   issuedEl.innerHTML = `<div class="key-issued-box"><strong>발급된 스크립트 키 (한 번만 표시됩니다)</strong><pre><code>${esc(issued.token)}</code></pre><pre><code>${esc(loaderFor(issued.slug, issued.token))}</code></pre><button class="secondary" data-action="copy-issued">로더 복사</button> <button class="secondary" data-action="clear-issued">닫기</button></div>`;
@@ -46,14 +67,101 @@ function renderKeys(list) {
   }).join('');
 }
 async function refreshKeys() {
-  if (!tokenEl.value.trim()) { me = null; keysEl.innerHTML = '<div class="empty">API 키를 입력하면 내 스크립트 키가 표시됩니다.</div>'; return; }
+  if (!tokenEl.value.trim()) { keysEl.innerHTML = '<div class="empty">API 키를 입력하면 내 스크립트 키가 표시됩니다.</div>'; return; }
   keysEl.innerHTML = '<div class="empty">불러오는 중...</div>';
-  try {
-    me = (await api('/api/auth/me')).user;
-    const data = await api('/api/script-keys');
-    renderKeys(data.keys || []);
-  } catch (error) { me = null; keysEl.innerHTML = `<div class="empty">${esc(error.message)}</div>`; }
+  try { const data = await api('/api/script-keys'); renderKeys(data.keys || []); }
+  catch (error) { keysEl.innerHTML = `<div class="empty">${esc(error.message)}</div>`; }
 }
+
+function renderUsers(list) {
+  if (!list.length) { usersEl.innerHTML = '<div class="empty">사용자가 없습니다.</div>'; return; }
+  usersEl.innerHTML = list.map((u) => {
+    const roleControl = me.role === 'owner' && u.id !== me.id
+      ? `<select data-action="set-role" data-id="${esc(u.id)}">${['user', 'admin', 'owner'].map((r) => `<option value="${r}"${r === u.role ? ' selected' : ''}>${r}</option>`).join('')}</select>`
+      : `<small>${esc(u.role)}</small>`;
+    const toggle = u.id === me.id ? '' : `<button class="secondary" data-action="toggle-user" data-id="${esc(u.id)}" data-status="${esc(u.status)}">${u.status === 'active' ? '차단' : '차단 해제'}</button>`;
+    return `<article class="script-row"><div class="script-icon">ID</div><div class="script-info"><strong>${esc(u.username)}</strong><small>${esc(u.status)} · ${new Date(u.created_at).toLocaleDateString()}</small></div><div class="row-actions">${roleControl}${toggle}</div></article>`;
+  }).join('');
+}
+function renderApiKeys(list) {
+  if (!list.length) { apiKeysEl.innerHTML = '<div class="empty">API 키가 없습니다.</div>'; return; }
+  apiKeysEl.innerHTML = list.map((k) => {
+    const revoked = !!k.revoked_at;
+    const button = revoked ? '' : `<button class="danger" data-action="revoke-api-key" data-id="${esc(k.id)}">폐기</button>`;
+    const used = k.last_used_at ? `마지막 사용 ${new Date(k.last_used_at).toLocaleString()}` : '사용 기록 없음';
+    return `<article class="script-row"><div class="script-icon">KEY</div><div class="script-info"><strong>${esc(k.username)}</strong><small>${esc(k.key_prefix)}… · ${revoked ? '폐기됨' : '활성'} · ${esc(k.user_role)} · ${used} · ${k.expires_at ? `${new Date(k.expires_at).toLocaleDateString()} 만료` : '무기한'}</small></div><div class="row-actions">${button}</div></article>`;
+  }).join('');
+}
+async function refreshAdmin() {
+  adminEl.hidden = !isManager();
+  if (!isManager()) return;
+  newRoleEl.innerHTML = (me.role === 'owner' ? ['user', 'admin', 'owner'] : ['user']).map((r) => `<option value="${r}">${r}</option>`).join('');
+  try {
+    const [users, keys] = await Promise.all([api('/api/users'), api('/api/keys')]);
+    renderUsers(users.users || []);
+    renderApiKeys(keys.keys || []);
+  } catch (error) {
+    usersEl.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+    apiKeysEl.innerHTML = '';
+  }
+}
+async function refreshAll() {
+  try { await loadMe(); } catch (error) { notify(error.message, true); }
+  await Promise.all([refresh(), refreshKeys(), refreshAdmin()]);
+}
+
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-copy]');
+  if (button) copyText(button.dataset.copy);
+});
+$('signup-btn').addEventListener('click', async () => {
+  const button = $('signup-btn'); button.disabled = true;
+  try {
+    const data = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ username: $('signup-name').value.trim() }) });
+    tokenEl.value = data.key.token;
+    signupResultEl.innerHTML = tokenBox(`${data.user.username} 소유자 API 키 (한 번만 표시됩니다)`, data.key.token);
+    notify('소유자 계정을 만들었습니다. 키를 안전한 곳에 보관하세요.');
+    await refreshAll();
+  } catch (error) { notify(error.message, true); }
+  finally { button.disabled = false; }
+});
+$('admin-refresh').addEventListener('click', refreshAdmin);
+$('issue-key').addEventListener('click', async () => {
+  const username = newUserEl.value.trim();
+  if (!username) { notify('사용자 이름을 입력하세요.', true); return; }
+  const body = { username, role: newRoleEl.value };
+  if (newDaysEl.value.trim()) body.expires_in_days = Number(newDaysEl.value);
+  try {
+    const data = await api('/api/keys', { method: 'POST', body: JSON.stringify(body) });
+    apiIssuedEl.innerHTML = tokenBox(`${data.key.username} API 키 (한 번만 표시됩니다)`, data.key.token);
+    newUserEl.value = ''; newDaysEl.value = '';
+    notify('API 키를 발급했습니다.');
+    await refreshAdmin();
+  } catch (error) { notify(error.message, true); }
+});
+adminEl.addEventListener('click', async (event) => {
+  const button = event.target.closest('button[data-action]'); if (!button) return;
+  const { action, id, status } = button.dataset;
+  try {
+    if (action === 'toggle-user') {
+      await api(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify({ status: status === 'active' ? 'blocked' : 'active' }) });
+    } else if (action === 'revoke-api-key') {
+      if (!confirm('이 API 키를 폐기할까요? 이 키로는 더 이상 로그인할 수 없습니다.')) return;
+      await api(`/api/keys/${id}`, { method: 'DELETE' });
+    } else return;
+    notify('처리했습니다.');
+    await refreshAdmin();
+  } catch (error) { notify(error.message, true); }
+});
+adminEl.addEventListener('change', async (event) => {
+  const select = event.target.closest('select[data-action="set-role"]'); if (!select) return;
+  try {
+    await api(`/api/users/${select.dataset.id}`, { method: 'PATCH', body: JSON.stringify({ role: select.value }) });
+    notify('역할을 바꿨습니다.');
+  } catch (error) { notify(error.message, true); }
+  await refreshAdmin();
+});
+
 codeEl.addEventListener('input', () => $('size').textContent = bytes(new TextEncoder().encode(codeEl.value).length));
 fileEl.addEventListener('change', async () => {
   const file = fileEl.files?.[0]; if (!file) return;
@@ -78,7 +186,7 @@ $('publish').addEventListener('click', async () => {
 });
 $('refresh').addEventListener('click', refresh);
 $('keys-refresh').addEventListener('click', refreshKeys);
-tokenEl.addEventListener('change', () => { refresh(); refreshKeys(); });
+tokenEl.addEventListener('change', refreshAll);
 listEl.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-action]'); if (!button) return;
   const { action, id } = button.dataset;
@@ -120,10 +228,7 @@ listEl.addEventListener('click', async (event) => {
 issuedEl.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-action]'); if (!button) return;
   if (button.dataset.action === 'clear-issued') { issued = null; renderIssued(); return; }
-  if (button.dataset.action === 'copy-issued' && issued) {
-    const loader = loaderFor(issued.slug, issued.token);
-    try { await navigator.clipboard.writeText(loader); notify('로더 복사 완료'); } catch { notify(loader); }
-  }
+  if (button.dataset.action === 'copy-issued' && issued) await copyText(loaderFor(issued.slug, issued.token));
 });
 keysEl.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-action]'); if (!button) return;
@@ -140,6 +245,7 @@ keysEl.addEventListener('click', async (event) => {
     await refreshKeys();
   } catch (error) { notify(error.message, true); }
 });
+
 renderIssued();
-refresh();
-refreshKeys();
+checkSetup();
+refreshAll();
