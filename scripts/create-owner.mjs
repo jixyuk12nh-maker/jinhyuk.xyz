@@ -12,7 +12,17 @@ if (!username || !/^[A-Za-z0-9_.-]{2,40}$/.test(username)) {
 
 const userId = randomBytes(12).toString('hex');
 const keyId = randomBytes(12).toString('hex');
-const key = 'tmk_' + randomBytes(32).toString('base64url');
+const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const randomAlnum = (length) => {
+  let out = '';
+  while (out.length < length) {
+    for (const b of randomBytes(length * 2)) {
+      if (b < 248 && out.length < length) out += ALNUM[b % ALNUM.length];
+    }
+  }
+  return out;
+};
+const key = 'tmk_' + randomAlnum(52);
 const hash = createHash('sha256').update(key).digest('hex');
 
 const sql = [
