@@ -62,13 +62,13 @@ const contentDisposition = (slug) => {
   const ascii = name.replace(/[^\x20-\x7e]/g, '_');
   return `inline; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 };
-const keyStub = (slug) => `local request_fn = (syn and syn.request) or (http and http.request) or http_request or request
+const keyStub = (slug, origin) => `local request_fn = (syn and syn.request) or (http and http.request) or http_request or request
 assert(request_fn, "이 실행기는 request 함수를 지원하지 않습니다")
 assert(type(script_key) == "string" and script_key ~= "", "script_key를 먼저 설정하세요")
 local hwid = "unknown"
 pcall(function() hwid = game:GetService("RbxAnalyticsService"):GetClientId() end)
 local response = request_fn({
-	Url = "https://jinhyuk.xyz/api/key-run",
+	Url = "${origin}/api/key-run",
 	Method = "POST",
 	Headers = { ["Content-Type"] = "application/json" },
 	Body = '{"slug":"${slug}","key":"' .. script_key .. '","hwid":"' .. hwid .. '"}'
@@ -280,7 +280,9 @@ async function handleApi(request, env, url) {
   const bannedMatch = path.match(/^\/api\/banned-ips\/([^/]{3,64})$/);
   if (bannedMatch && method === 'DELETE') {
     if (!manager) return forbidden();
-    return unbanIp(request, env, auth, decodeURIComponent(bannedMatch[1]));
+    let ip;
+    try { ip = decodeURIComponent(bannedMatch[1]); } catch { return fail(400, 'Invalid IP address.'); }
+    return unbanIp(request, env, auth, ip);
   }
 
   if (path === '/api/execute' && method === 'POST') return execute(request, env, auth, await readBody(request));
@@ -579,6 +581,7 @@ async function importLicenseUsers(request, env, auth, projectId, body) {
 async function banIp(request, env, auth, body) {
   const ip = String(body?.ip ?? '').trim();
   if (!/^[0-9a-fA-F:.]{3,45}$/.test(ip)) return fail(400, 'Enter a valid IP address.');
+  if (ip === request.headers.get('cf-connecting-ip')) return fail(409, '현재 접속 중인 IP는 차단할 수 없습니다.');
   const reason = safeName(body?.reason);
   await env.DB.prepare('INSERT OR IGNORE INTO banned_ips (ip, reason) VALUES (?,?)').bind(ip, reason).run();
   await audit(env, request, auth, 'ip.ban', ip, 'ok');
@@ -641,7 +644,7 @@ async function serveRaw(request, env, kind, value) {
   if (!row) return new Response('Script not found', { status: 404, headers: TEXT_HEADERS });
   if (row.mode === 'key') {
     await audit(env, request, null, 'script.raw.stub', row.id, 'ok');
-    return new Response(keyStub(row.slug), { headers: { ...TEXT_HEADERS, 'content-disposition': contentDisposition(row.slug) } });
+    return new Response(keyStub(row.slug, new URL(request.url).origin), { headers: { ...TEXT_HEADERS, 'content-disposition': contentDisposition(row.slug) } });
   }
   const object = await env.BUCKET.get(row.object_key);
   if (!object) return new Response('Script content missing', { status: 404, headers: TEXT_HEADERS });
@@ -670,7 +673,11 @@ async function keyRunCore(request, env, body) {
         await audit(env, request, null, 'script.key_run', script.id, 'hwid_mismatch');
         return fail(403, 'This key is bound to another device.');
       }
-      if (!license.hwid) await env.DB.prepare('UPDATE license_users SET hwid = ? WHERE id = ?').bind(hwid, license.id).run();
+      if (!license.hwid) {
+        await env.DB.prepare('UPDATE license_users SET hwid = ? WHERE id = ? AND hwid IS NULL').bind(hwid, license.id).run();
+        const bound = await env.DB.prepare('SELECT hwid FROM license_users WHERE id = ?').bind(license.id).first();
+        if (bound?.hwid !== hwid) return fail(403, 'This key is bound to another device.');
+      }
     }
     await env.DB.prepare('UPDATE license_users SET used = 1 WHERE id = ?').bind(license.id).run();
     const object = await env.BUCKET.get(script.object_key);
@@ -692,7 +699,11 @@ async function keyRunCore(request, env, body) {
       await audit(env, request, { user: { id: row.user_id }, keyId: row.id }, 'script.key_run', script.id, 'hwid_mismatch');
       return fail(403, 'This key is bound to another device.');
     }
-    if (!row.hwid) await env.DB.prepare('UPDATE script_keys SET hwid = ? WHERE id = ?').bind(hwid, row.id).run();
+    if (!row.hwid) {
+      await env.DB.prepare('UPDATE script_keys SET hwid = ? WHERE id = ? AND hwid IS NULL').bind(hwid, row.id).run();
+      const bound = await env.DB.prepare('SELECT hwid FROM script_keys WHERE id = ?').bind(row.id).first();
+      if (bound?.hwid !== hwid) return fail(403, 'This key is bound to another device.');
+    }
   }
   await env.DB.prepare(`UPDATE script_keys SET last_used_at = ${NOW_SQL} WHERE id = ?`).bind(row.id).run();
   const object = await env.BUCKET.get(script.object_key);
@@ -716,9 +727,11 @@ async function execute(request, env, auth, body) {
 }
 
 async function uniqueSlug(env, name) {
-  const base = (safeSlug(name) || `script-${randomHex(3)}`).replace(/\.lua$/, '');
+  const root = (safeSlug(name) || `script-${randomHex(3)}`).replace(/\.lua$/, '');
   for (let i = 0; i < 50; i += 1) {
-    const candidate = i === 0 ? base : `${base}-${i + 1}`;
+    const suffix = i === 0 ? '' : `-${i + 1}`;
+    // 접미사를 붙여도 SLUG_RE(최대 56자) 안에 들어가도록 이름 부분을 줄인다.
+    const candidate = root.slice(0, 56 - suffix.length) + suffix;
     if (RESERVED.includes(candidate)) continue;
     if (!(await env.DB.prepare('SELECT id FROM hosted_scripts WHERE slug = ?').bind(candidate).first())) return candidate;
   }
@@ -958,7 +971,15 @@ async function issueKey(request, env, auth, body) {
   const role = body.role === undefined ? 'user' : String(body.role);
   if (!ROLES.includes(role)) return fail(400, 'Invalid role.');
 
+  // 모든 입력을 먼저 검사한 뒤에만 DB에 쓴다. (검사 실패 시 사용자 행이 남지 않도록)
+  const expiry = expiresFromDays(body.expires_in_days);
+  if (!expiry.ok) return fail(400, 'expires_in_days must be between 1 and 3650.');
+  const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 60) : null;
+  const projectId = body.project_id ? String(body.project_id) : null;
+  if (projectId && !(await env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(projectId).first())) return fail(404, 'Project not found.');
+
   let target = null;
+  let newUser = null;
   if (body.user_id) {
     target = await env.DB.prepare('SELECT id, username, role, status FROM api_users WHERE id = ?').bind(String(body.user_id)).first();
     if (!target) return fail(404, 'User not found.');
@@ -971,19 +992,15 @@ async function issueKey(request, env, auth, body) {
     target = await env.DB.prepare('SELECT id, username, role, status FROM api_users WHERE username = ?').bind(username).first();
     if (!target) {
       if (actor.role === 'admin' && role !== 'user') return fail(403, 'Admins can only create user accounts.');
-      const id = randomHex(12);
-      await env.DB.prepare('INSERT INTO api_users (id, username, role, status, created_by) VALUES (?,?,?,?,?)').bind(id, username, role, 'active', actor.id).run();
-      target = { id, username, role, status: 'active' };
+      newUser = { id: randomHex(12), username, role, status: 'active' };
+      target = newUser;
     }
   }
   if (actor.role === 'admin' && target.role !== 'user') return fail(403, 'Admins can only manage user accounts.');
   if (target.status !== 'active') return fail(409, 'User is blocked.');
-  const expiry = expiresFromDays(body.expires_in_days);
-  if (!expiry.ok) return fail(400, 'expires_in_days must be between 1 and 3650.');
-
-  const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 60) : null;
-  const projectId = body.project_id ? String(body.project_id) : null;
-  if (projectId && !(await env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(projectId).first())) return fail(404, 'Project not found.');
+  if (newUser) {
+    await env.DB.prepare('INSERT INTO api_users (id, username, role, status, created_by) VALUES (?,?,?,?,?)').bind(newUser.id, newUser.username, newUser.role, 'active', actor.id).run();
+  }
   const key = newSecret('tmk_');
   const keyId = randomHex(12);
   await env.DB.prepare('INSERT INTO api_keys (id, user_id, key_hash, key_prefix, created_by, expires_at, label, project_id, token) VALUES (?,?,?,?,?,?,?,?,?)')
