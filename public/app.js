@@ -8,8 +8,8 @@
   const DEFAULT_OPTS = { free: true, silent: false, heartbeat: true, light: false, secure: true, hwid: false };
   const SCRIPT_LIMIT = 18;
   const KEY_LIMIT = 10000;
-  const TOKEN_KEY = 'luarmor-api-key';
-  const SELECTED_KEY = 'luarmor-selected-project';
+  const TOKEN_KEY = 'jinhyuk-api-key';
+  const SELECTED_KEY = 'jinhyuk-selected-project';
   const ORPHAN_ID = '__no_project__';
   const BUSY_MSG = '저장 중입니다. 잠시만 기다려 주세요.';
   const TOKEN_RE = /^tmk_[A-Za-z0-9_-]{20,}$/;
@@ -18,6 +18,7 @@
   const db = { projects: [], scripts: [], banned: [], keys: [], scriptKeys: [], usage: { obfuscations: 0, limit: null }, selectedId: null, apiKey: '', role: '', me: null };
   let view = 'projects';
   let editScriptId = null;
+  let loadedCode = null;
   let ctxId = null;
   let projectEditId = null;
   let pending = [];
@@ -107,7 +108,6 @@
   }
 
   async function loadKeys() {
-    // user 역할은 API 키 목록을 볼 수 없으므로 요청하지 않는다.
     try {
       if (db.role === 'user') throw new Error('not allowed');
       const data = await api('/api/keys');
@@ -291,6 +291,7 @@
   function renderChrome() {
     const isUser = db.role === 'user';
     $('drawer').querySelectorAll('.nav-item[data-nav="users"]').forEach((b) => { b.hidden = isUser; });
+    document.querySelectorAll('[data-action="open-create"]').forEach((b) => { b.hidden = isUser; });
     if (isUser && view === 'users') view = 'projects';
     const keys = view === 'script-keys';
     const users = view === 'users';
@@ -303,7 +304,7 @@
     const label = profile ? 'Profile' : users ? 'API Keys' : keys ? 'Users' : 'Projects';
     $('crumb').textContent = label;
     $('pageTitle').textContent = label;
-    document.title = 'Luarmor — ' + label;
+    document.title = 'jinhyuk.xyz — ' + label;
     $('drawer').querySelectorAll('.nav-item[data-nav]').forEach((b) => {
       b.classList.toggle('is-active', b.dataset.nav === view);
     });
@@ -424,7 +425,6 @@
     }
   }
 
-  // 프로필 탭: 작성자 본인의 스크립트 원문 저장소 (소유자는 전체)
   function renderProfile() {
     const list = $('profileList');
     list.textContent = '';
@@ -648,6 +648,7 @@
     $('scriptTitle').textContent = s ? s.name : 'New Script';
     $('scriptName').value = s ? s.name : '';
     $('scriptCode').value = '';
+    loadedCode = null;
     const opts = s
       ? { free: s.mode === 'keyless', silent: !!s.silent, heartbeat: !!s.heartbeat, light: !!s.lightweight, secure: !!s.secure_loader, hwid: !!s.hwid_lock }
       : { ...DEFAULT_OPTS };
@@ -663,6 +664,7 @@
       ]);
       if (editScriptId !== id) return;
       $('scriptCode').value = code.code;
+      loadedCode = code.code;
       const added = pending.filter((f) => !f.id);
       pending = [...(files.files || []).map((f) => ({ id: f.id, name: f.name, size: f.byte_size, file: null })), ...added];
       renderFiles();
@@ -697,12 +699,13 @@
     try {
       let scriptId = editScriptId;
       if (scriptId) {
-        await api(`/api/scripts/${scriptId}`, { method: 'PATCH', body: JSON.stringify(body) });
+        const patch = code === loadedCode ? (({ code: _same, ...rest }) => rest)(body) : body;
+        await api(`/api/scripts/${scriptId}`, { method: 'PATCH', body: JSON.stringify(patch) });
       } else {
         const data = await api('/api/scripts', { method: 'POST', body: JSON.stringify({ ...body, project_id: p.id }) });
         scriptId = data.script.id;
-        // 생성에 성공했으면 이후 재시도는 새로 만들지 않고 이 스크립트를 수정합니다.
         editScriptId = scriptId;
+        loadedCode = code;
       }
       const keptIds = new Set(pending.filter((f) => f.id).map((f) => f.id));
       const existing = (await api(`/api/scripts/${scriptId}/files`)).files || [];
@@ -711,7 +714,6 @@
       }
       for (const item of pending.filter((f) => f.file)) {
         const result = await api(`/api/scripts/${scriptId}/files`, { method: 'POST', body: JSON.stringify({ name: item.name, content: await item.file.text() }) });
-        // 업로드된 파일은 표시를 바꿔서, 재시도할 때 같은 파일을 두 번 올리지 않게 합니다.
         item.id = result.file.id;
         item.file = null;
       }
