@@ -14,7 +14,7 @@ const USER_LIMIT = 10000;
 const MAX_FILES = 10;
 const BATCH_LIMIT = 300;
 const PROJECT_NAME_MAX = 60;
-const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, status, version, project_id, byte_size, sha256, created_at, updated_at';
+const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, status, version, project_id, byte_size, sha256, created_at, updated_at, created_by';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 const fail = (status, error) => json({ ok: false, error }, status);
@@ -106,17 +106,22 @@ const bumpVersion = (value) => {
 const boolInt = (value, fallback) => (value === undefined ? fallback : value ? 1 : 0);
 const isoNow = () => new Date().toISOString();
 
-async function authenticate(request, env) {
-  const match = (request.headers.get('authorization') || '').match(/^Bearer\s+(tmk_[A-Za-z0-9_-]{20,})$/);
-  if (!match) return null;
+async function authenticateToken(token, env) {
   const row = await env.DB.prepare(
     `SELECT k.id AS key_id, k.expires_at, k.revoked_at, u.id AS user_id, u.username, u.role, u.status
      FROM api_keys k JOIN api_users u ON u.id = k.user_id WHERE k.key_hash = ?`
-  ).bind(await sha256Hex(match[1])).first();
+  ).bind(await sha256Hex(token)).first();
   if (!row || row.revoked_at || row.status !== 'active' || isExpired(row.expires_at)) return null;
   await env.DB.prepare(`UPDATE api_keys SET last_used_at = ${NOW_SQL} WHERE id = ?`).bind(row.key_id).run();
-  return { user: { id: row.user_id, username: row.username, role: row.role }, keyId: row.key_id };
+  return { user: { id: row.user_id, username: row.username, role: row.role }, keyId: row.key_id, token };
 }
+
+async function authenticate(request, env) {
+  const match = (request.headers.get('authorization') || '').match(/^Bearer\s+(tmk_[A-Za-z0-9_-]{20,})$/);
+  return match ? authenticateToken(match[1], env) : null;
+}
+
+const canViewSource = (user, row) => user.role === 'owner' || (!!row.created_by && row.created_by === user.id);
 
 async function audit(env, request, auth, action, target, status) {
   try {
@@ -424,6 +429,9 @@ async function deleteProject(request, env, auth, id) {
     const { results: files = [] } = await env.DB.prepare('SELECT object_key FROM script_files WHERE script_id = ?').bind(script.id).all();
     orphanKeys.push(...files.map((f) => f.object_key), script.object_key);
   }
+  // API 키는 삭제하지 않고 프로젝트 연결만 끊는다. (FK ON DELETE CASCADE로 키가 사라지는 것을 막음)
+  await env.DB.prepare('UPDATE api_keys SET project_id = NULL WHERE project_id = ?').bind(id).run();
+  await env.DB.prepare('UPDATE license_users SET project_id = NULL WHERE project_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(id).run();
   await purgeObjects(env, orphanKeys);
   await audit(env, request, auth, 'project.delete', id, 'ok');
@@ -521,7 +529,11 @@ async function hardResetLicenseUser(request, env, auth, id) {
     }
   }
   const at = isoNow();
-  await env.DB.prepare('UPDATE license_users SET resets = resets + 1, last_reset = ?, hwid = NULL WHERE id = ?').bind(at, id).run();
+  const cutoff = new Date(Date.now() - current.reset_days * 86400000).toISOString();
+  const applied = await env.DB.prepare(
+    'UPDATE license_users SET resets = resets + 1, last_reset = ?, hwid = NULL WHERE id = ? AND (last_reset IS NULL OR last_reset <= ?)'
+  ).bind(at, id, cutoff).run();
+  if (!applied.meta?.changes) return fail(409, 'Hard reset is on cooldown.');
   await audit(env, request, auth, 'license.reset', id, 'ok');
   return json({ ok: true, user: licenseView({ ...current, resets: current.resets + 1, last_reset: at, hwid: null }) });
 }
@@ -595,6 +607,12 @@ async function unbanIp(request, env, auth, ip) {
   return json({ ok: true, ip });
 }
 
+function deniedPage() {
+  return new Response(`<!doctype html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>접근 불가</title></head>
+<body style="font-family:system-ui,sans-serif;background:#15171c;color:#f3f4f6;padding:40px"><h1>브라우저에서는 열람할 수 없습니다</h1><p>스크립트 원문은 관리 화면의 프로필 탭에서 확인하세요.</p></body></html>`, { status: 403, headers: HTML_HEADERS });
+}
+
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -638,9 +656,11 @@ function scriptPage(request, row) {
 }
 
 async function serveRaw(request, env, kind, value) {
-  const row = await env.DB.prepare(`SELECT id, slug, name, object_key, sha256, mode FROM hosted_scripts WHERE ${kind === 'id' ? 'id' : 'slug'} = ?`).bind(value).first();
-  const browser = row?.mode === 'key' ? isBrowserRequest(request) : isBrowserNavigation(request);
-  if (browser) return scriptPage(request, row);
+  const row = await env.DB.prepare(`SELECT id, slug, name, object_key, sha256, mode, created_by FROM hosted_scripts WHERE ${kind === 'id' ? 'id' : 'slug'} = ?`).bind(value).first();
+  if (isBrowserRequest(request)) {
+    if (!row) return scriptPage(request, null);
+    return deniedPage();
+  }
   if (!row) return new Response('Script not found', { status: 404, headers: TEXT_HEADERS });
   if (row.mode === 'key') {
     await audit(env, request, null, 'script.raw.stub', row.id, 'ok');
@@ -718,7 +738,7 @@ async function execute(request, env, auth, body) {
     ? await env.DB.prepare('SELECT * FROM hosted_scripts WHERE id = ?').bind(String(body.id)).first()
     : await env.DB.prepare('SELECT * FROM hosted_scripts WHERE slug = ?').bind(normalizeSlug(body.slug)).first();
   if (!script) return fail(404, 'Script not found.');
-  if (script.mode === 'key' && auth.user.role === 'user') return fail(403, '키 모드 스크립트는 관리자만 원문을 볼 수 있습니다.');
+  if (!canViewSource(auth.user, script)) return fail(403, '원문은 작성자와 소유자만 볼 수 있습니다.');
   const object = await env.BUCKET.get(script.object_key);
   if (!object) return fail(404, 'Script content missing.');
   const code = await object.text();
@@ -786,9 +806,9 @@ async function createScript(request, env, auth, body) {
   await env.BUCKET.put(objectKey, body.code, { ...OBJECT_META, customMetadata: { scriptId: id, sha256: digest } });
   try {
     await env.DB.prepare(
-      `INSERT INTO hosted_scripts (id, slug, name, object_key, byte_size, sha256, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, project_id, status, version)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','v0.0.0.1')`
-    ).bind(id, slug, name, objectKey, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, projectId).run();
+      `INSERT INTO hosted_scripts (id, slug, name, object_key, byte_size, sha256, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, project_id, status, version, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','v0.0.0.1',?)`
+    ).bind(id, slug, name, objectKey, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, projectId, auth.user.id).run();
   } catch (error) {
     await env.BUCKET.delete(objectKey);
     throw error;
@@ -1028,7 +1048,7 @@ async function updateUser(request, env, auth, userId, body) {
   const { status, role } = body;
   if (status === undefined && role === undefined) return fail(400, 'Nothing to update.');
   if (status !== undefined && !['active', 'blocked'].includes(status)) return fail(400, 'Invalid status.');
-  if (role !== undefined) {
+  if (role !== undefined && role !== target.role) {
     if (actor.role !== 'owner') return fail(403, 'Only the owner can change roles.');
     if (!ROLES.includes(role)) return fail(400, 'Invalid role.');
   }
