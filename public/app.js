@@ -7,14 +7,13 @@
   const KEY_PLACEHOLDER = '여기에_스크립트_키';
   const DEFAULT_OPTS = { free: true, silent: false, heartbeat: true, light: false, secure: true, hwid: false };
   const SCRIPT_LIMIT = 18;
-  const OBF_LIMIT = 3000;
   const KEY_LIMIT = 10000;
   const TOKEN_KEY = 'luarmor-api-key';
   const BUSY_MSG = '저장 중입니다. 잠시만 기다려 주세요.';
   const TOKEN_RE = /^tmk_[A-Za-z0-9_-]{20,}$/;
   const GEAR = '<svg viewBox="0 0 24 24" aria-hidden="true" width="18" height="18" fill="currentColor"><path d="m19.42 13.1 1.11.86-1.93 3.34-1.3-.52c-.47.35-.99.65-1.55.87l-.19 1.38h-3.85l-.19-1.38c-.56-.22-1.08-.52-1.55-.87l-1.3.52-1.93-3.34 1.11-.86a6.96 6.96 0 0 1 0-1.8l-1.11-.86L8.67 7.1l1.3.52c.47-.35.99-.65 1.55-.87l.19-1.38h3.85l.19 1.38c.56.22 1.08.52 1.55.87l1.3-.52 1.93 3.34-1.11.86c.08.59.08 1.21 0 1.8ZM13.64 14.3a2.95 2.95 0 1 0 0-5.9 2.95 2.95 0 0 0 0 5.9Z"/></svg>';
 
-  const db = { projects: [], scripts: [], banned: [], keys: [], scriptKeys: [], usage: { obfuscations: 0, limit: OBF_LIMIT }, selectedId: null, apiKey: '', role: '' };
+  const db = { projects: [], scripts: [], banned: [], keys: [], scriptKeys: [], usage: { obfuscations: 0, limit: null }, selectedId: null, apiKey: '', role: '' };
   let view = 'projects';
   let editScriptId = null;
   let ctxId = null;
@@ -84,7 +83,7 @@
     db.projects = data.projects || [];
     db.scripts = data.scripts || [];
     db.banned = data.banned_ips || [];
-    db.usage = data.usage || { obfuscations: 0, limit: OBF_LIMIT };
+    db.usage = data.usage || { obfuscations: 0, limit: null };
     if (!project(db.selectedId)) db.selectedId = db.projects[0] ? db.projects[0].id : null;
   }
 
@@ -114,8 +113,7 @@
     try {
       await loadRole();
       if (db.role === 'user') {
-        clearData();
-        notifyUserRole();
+        await loadUserWorkspace();
       } else {
         await loadDashboard();
         await loadKeys();
@@ -143,8 +141,14 @@
     db.keys = []; db.scriptKeys = [];
   }
 
-  function notifyUserRole() {
-    toast('This account has the user role. The dashboard is only available to admins and owners.');
+  async function loadUserWorkspace() {
+    const [projects, scripts] = await Promise.all([api('/api/projects'), api('/api/scripts')]);
+    db.projects = projects.projects || [];
+    db.scripts = scripts.scripts || [];
+    db.banned = [];
+    db.usage = { obfuscations: 0, limit: null };
+    if (!project(db.selectedId)) db.selectedId = db.projects[0] ? db.projects[0].id : null;
+    await loadKeys();
   }
 
   function renderAll() {
@@ -262,6 +266,9 @@
   }
 
   function renderChrome() {
+    const isUser = db.role === 'user';
+    $('drawer').querySelectorAll('.nav-item[data-nav="users"], .nav-item[data-nav="banned"]').forEach((b) => { b.hidden = isUser; });
+    if (isUser && (view === 'users' || view === 'banned')) view = 'projects';
     const keys = view === 'script-keys';
     const users = view === 'users';
     $('viewProjects').classList.toggle('active', view === 'projects');
@@ -390,8 +397,8 @@
     }
     const obf = db.usage.obfuscations || 0;
     $('obfCount').textContent = obf;
-    $('obfMeta').textContent = obf + '/' + OBF_LIMIT;
-    setBar($('obfBar'), obf / OBF_LIMIT * 100);
+    $('obfMeta').textContent = obf + ' / ∞';
+    setBar($('obfBar'), 0);
     if (view === 'script-keys') {
       const list = p ? projectScriptKeys(p.id) : [];
       const live = list.filter((k) => k.status === 'active').length;
@@ -831,7 +838,9 @@
       $('setupBlock').hidden = true;
       setBusy(button, false, 'CREATE OWNER');
       renderApiStatus();
-      banner('accountBanner', 'Owner created. The API key is shown once: ' + token + ' (copy it now)', 'ok');
+      const copied = await copyText(token);
+      closeDialog();
+      toast(copied ? 'Owner 생성 완료. API 키를 복사했습니다.' : 'Owner 생성 완료. 계정 설정에서 API 키를 확인하세요.');
       await refresh();
     } catch (error) {
       setBusy(button, false, 'CREATE OWNER');
@@ -852,7 +861,7 @@
     try {
       await loadRole();
       if (db.role === 'user') {
-        clearData();
+        await loadUserWorkspace();
       } else {
         await loadDashboard();
         await loadKeys();
@@ -861,8 +870,7 @@
       renderApiStatus();
       renderAll();
       closeDialog();
-      if (db.role === 'user') notifyUserRole();
-      else toast('API key saved.');
+      toast('API key saved.');
     } catch (error) {
       writeKey(previous);
       setBusy(button, false, 'SAVE KEY');
