@@ -109,13 +109,10 @@
 
   <div class="view" id="viewUsers">
     <div class="empty-card" id="usersEmpty">
-      <p>No projects yet</p>
-      <p class="hint">Create a project first, then create API keys for it.</p>
+      <p>No accounts yet</p>
+      <p class="hint">Accounts appear here once an API key is issued to them.</p>
     </div>
-    <section class="user-list" id="userList" aria-label="Projects and API keys"></section>
-    <div class="create-wrap">
-      <button class="btn primary big" data-action="open-create">+ CREATE PROJECT</button>
-    </div>
+    <section class="user-list" id="userList" aria-label="Accounts and API keys"></section>
     <footer class="footer-bar">
       <span>© 2026 jinhyuk.xyz</span>
       <nav class="footer-links" aria-label="Footer">
@@ -286,7 +283,7 @@
       <label class="field">MEMO (OPTIONAL)
         <textarea id="skMemo" rows="3" maxlength="300" placeholder="Notes about this key"></textarea>
       </label>
-      <label class="field" id="skExpireRow">EXPIRES IN (EMPTY = PERMANENT)
+      <label class="field" id="skExpireRow">EXPIRES IN MINUTES (EMPTY = PERMANENT, MIN 30)
         <input id="skExpire" type="text" maxlength="20" autocomplete="off" />
       </label>
       <p class="hint">Examples: 30 minutes, 1 hour, 7 days. Leave empty or type permanent for a key that never expires. Minimum 30 minutes.</p>
@@ -339,7 +336,7 @@
           <label class="field">AMOUNT (1 - 2500)
             <input id="mkAmount" type="number" min="1" max="2500" value="10" />
           </label>
-          <label class="field">EXPIRES IN (EMPTY = PERMANENT)
+          <label class="field">EXPIRES IN MINUTES (EMPTY = PERMANENT, MIN 30)
             <input id="mkExpire" type="text" maxlength="20" autocomplete="off" />
           </label>
           <button class="btn primary" id="mkGenerate">GENERATE</button>
