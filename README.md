@@ -9,7 +9,8 @@ Cloudflare Worker(`tm`), D1(`tm-db`), R2(`jinhyuk--xyz`)로 Lua 스크립트를 
 | admin | `user` 계정과 그 키 관리 (API 키는 `user` 계정에만 발급), 스크립트 관리 |
 | user | 로그인 후 스크립트 생성·수정·삭제, 스크립트 키 발급, 본인 키 조회·폐기 |
 
-API 키는 앱사이트 로그인용이며, 프로젝트별로 Users 탭에서 발급·폐기합니다. 스크립트 키는 API로 발급합니다.
+API 키는 앱사이트 로그인용이며, **계정(사용자)마다** 발급합니다. 관리 화면의 API Keys 화면은 계정 목록이고, 여기서 역할·차단 상태·키를 관리합니다. 프로젝트는 키에 선택적으로 연결되는 정보일 뿐이며, 접근 권한은 계정의 역할로 정해집니다.
+스크립트 키는 키 모드 스크립트마다 Script Keys 화면에서 발급하고, API로도 발급합니다.
 
 ## 실행 모드
 - 키리스(`keyless`): 누구나 실행합니다.
@@ -92,7 +93,7 @@ npm test
 - `PATCH /api/script-keys/:id`: 정지·재개, HWID 초기화 `{"reset_hwid": true}` (owner, admin)
 - `DELETE /api/script-keys/:id`: 폐기 (본인 또는 owner, admin)
 - `GET /api/users`, `GET /api/keys`: 사용자와 API 키 목록 (owner, admin, admin은 user만)
-- `POST /api/keys`, `DELETE /api/keys/:id`: API 키 발급·폐기 (owner, admin)
+- `POST /api/keys`, `DELETE /api/keys/:id`: API 키 발급·폐기 (owner, admin). 키는 `user_id` 또는 `username`으로 계정에 붙고, `project_id`는 선택입니다. admin은 `user` 계정에만 발급합니다.
 - `PATCH /api/users/:id`: 상태 변경 (owner, admin), 역할 변경 (owner)
 
 ## 원문 보호 규칙
@@ -103,7 +104,7 @@ npm test
 - Roblox 실행기처럼 브라우저가 아닌 요청은 기존과 같습니다. 키리스는 원문, 키 모드는 키 검증용 스텁을 받습니다.
 
 ## 앱사이트
-`/`는 소개 페이지이고, 관리 화면은 `/admin`입니다. 관리 화면에서 API 키로 로그인합니다. 스크립트 주소를 브라우저로 열면 원문 대신 로더를 보여 주는 페이지가 나옵니다. 소유자와 관리자는 Users 화면에서 사용자 추가, API 키 발급·폐기, 차단, 역할 변경을 할 수 있습니다. Scripts 화면에서 키 모드 스크립트의 KEY 버튼으로 스크립트 키를 발급하고, Script Keys 화면에서 정지·재개·폐기·HWID 초기화를 합니다.
+`/`는 소개 페이지이고, 관리 화면은 `/admin`입니다. 관리 화면에서 API 키로 로그인합니다. 스크립트 주소를 브라우저로 열면 원문 대신 로더를 보여 주는 페이지가 나옵니다. 소유자와 관리자는 API Keys 화면의 계정 목록에서 키 해지, 차단·차단 해제를 할 수 있습니다. 역할 변경은 소유자만 합니다. 관리자는 `user` 계정만 보이고 관리합니다. 계정 추가와 키 발급은 같은 화면에서 계정 기준으로 진행합니다. Scripts 화면에서 키 모드 스크립트의 KEY 버튼으로 스크립트 키를 발급하고, Script Keys 화면에서 정지·재개·폐기·HWID 초기화를 합니다.
 
 ## 한계
 - 키리스 원문과 키 모드 로더는 누구나 받을 수 있습니다. 키 모드의 실제 코드는 유효한 키에만 내주지만, 키를 받은 사람은 그 코드를 복사할 수 있습니다.
