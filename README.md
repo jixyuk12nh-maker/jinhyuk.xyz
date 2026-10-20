@@ -28,7 +28,7 @@ API 키는 앱사이트 로그인용이며, 프로젝트별로 Users 탭에서 �
 ## 배포
 1. D1 스키마를 확인합니다. `api_users`나 `api_keys`가 이미 있다면 구조를 먼저 확인하세요.
    `npx wrangler d1 execute tm-db --remote --command "SELECT name FROM sqlite_master WHERE type='table';"`
-2. D1을 백업한 뒤 마이그레이션을 적용합니다.
+2. D1을 백업한 뒤 마이그레이션을 적용합니다. (0010은 키 검증 실패 차단용 `key_run_failures` 테이블을 만듭니다. 적용 전이라도 키 실행은 정상 동작합니다.)
    `npm run db:migrate:remote`
 3. 배포합니다.
    `npm run check && npm run deploy`
@@ -43,12 +43,12 @@ API 키는 앱사이트 로그인용이며, 프로젝트별로 Users 탭에서 �
 
 ## API
 - `GET /api/health`: 상태 확인 (인증 불필요)
-- `POST /api/key-run`: 키 모드 로더가 키를 검증받고 원문을 받는 경로 (인증 불필요, 키가 필요)
+- `POST /api/key-run`: 키 모드 로더가 키를 검증받고 원문을 받는 경로 (인증 불필요, 키가 필요). 브라우저로 열면 403, 같은 IP에서 검증 실패가 30회 쌓이면 10분간 429로 차단합니다.
 - `POST /api/auth/signup`: 소유자가 없을 때만 가입 가능 (인증 불필요)
 - `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
 - `GET /api/scripts`: 스크립트 목록
 - `POST /api/scripts`, `PATCH /api/scripts/:id`, `DELETE /api/scripts/:id`: owner, admin
-- `POST /api/execute`: 키리스 스크립트 원문 반환 (API 키 필요)
+- `POST /api/execute`: 스크립트 원문 반환 (API 키 필요). 일반 사용자는 키리스 스크립트만 받을 수 있고, 관리자·소유자는 키 모드 스크립트도 받을 수 있습니다.
 - `POST /api/scripts/:id/keys`: 키 모드 스크립트의 키 발급 (로그인한 누구나, 같은 스크립트의 키를 여러 개 발급 가능; 키마다 HWID가 따로 묶임)
 - `GET /api/script-keys`: 본인 키 목록 (owner, admin은 전체)
 - `PATCH /api/script-keys/:id`: 정지·재개, HWID 초기화 `{"reset_hwid": true}` (owner, admin)
@@ -58,11 +58,11 @@ API 키는 앱사이트 로그인용이며, 프로젝트별로 Users 탭에서 �
 - `PATCH /api/users/:id`: 상태 변경 (owner, admin), 역할 변경 (owner)
 
 ## 앱사이트
-`public/`의 페이지에서 API 키로 로그인합니다. 소유자와 관리자는 Users 화면에서 사용자 추가, API 키 발급·폐기, 차단, 역할 변경을 할 수 있습니다. Scripts 화면에서 키 모드 스크립트의 KEY 버튼으로 스크립트 키를 발급하고, Script Keys 화면에서 정지·재개·폐기·HWID 초기화를 합니다.
+`/`는 소개 페이지이고, 관리 화면은 `/admin`입니다. 관리 화면에서 API 키로 로그인합니다. 스크립트 주소를 브라우저로 열면 원문 대신 로더를 보여 주는 페이지가 나옵니다. 소유자와 관리자는 Users 화면에서 사용자 추가, API 키 발급·폐기, 차단, 역할 변경을 할 수 있습니다. Scripts 화면에서 키 모드 스크립트의 KEY 버튼으로 스크립트 키를 발급하고, Script Keys 화면에서 정지·재개·폐기·HWID 초기화를 합니다.
 
 ## 한계
 - 키리스 원문과 키 모드 로더는 누구나 받을 수 있습니다. 키 모드의 실제 코드는 유효한 키에만 내주지만, 키를 받은 사람은 그 코드를 복사할 수 있습니다.
 - 원문 URL은 브라우저 주소창에서 열면 403이 나옵니다. 이는 요청 헤더 기준이라 완전하지 않습니다.
-- 요청 제한(rate limit)은 아직 없습니다.
-- 키 모드 스크립트의 원문은 화면에서 읽을 수 없어, 편집할 때 코드를 새로 붙여넣어야 저장됩니다.
+- 키 검증 실패에 대한 제한(IP당 30회 실패 시 10분 차단) 외에 일반 API 요청 제한은 아직 없습니다.
+- 키 모드 스크립트의 원문도 소유자와 관리자는 편집 창에서 볼 수 있습니다. 일반 사용자에게는 원문이 나가지 않습니다.
 - 주요 작업과 인증 실패는 `api_audit_logs`에 기록됩니다.
