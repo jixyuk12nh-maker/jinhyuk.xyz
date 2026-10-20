@@ -10,14 +10,24 @@ const USAGE = `사용법:
 옵션:
   -o, --out <경로>   출력 파일 또는 폴더
   --check            출력 없이 VM/원문 구간 수만 보고
+  --density <0-3>    가짜 명령과 죽은 블록 밀도 (0 끔, 3 기본 = 최대)
+  --dialect <이름>   auto(기본: 5.1→5.2→5.3→5.4→luau→mixed 순으로 처음 통과하는 방언), 5.1, 5.2, 5.3, 5.4, luau, mixed
   -h, --help         도움말`;
 
 function parseArgs(argv) {
-  const opts = { input: null, out: null, check: false, help: false };
+  const opts = { input: null, out: null, check: false, help: false, density: 3, dialect: 'auto' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '--check') opts.check = true;
+    else if (a === '--density') {
+      opts.density = Number(argv[++i]);
+      if (!Number.isInteger(opts.density) || opts.density < 0 || opts.density > 3) throw new Error('--density 는 0~3 정수');
+    }
+    else if (a === '--dialect') {
+      opts.dialect = argv[++i];
+      if (!['auto', '5.1', '5.2', '5.3', '5.4', 'luau', 'mixed'].includes(opts.dialect)) throw new Error('--dialect 는 auto, 5.1, 5.2, 5.3, 5.4, luau, mixed 중 하나');
+    }
     else if (a === '-o' || a === '--out') opts.out = argv[++i];
     else if (a.startsWith('-')) throw new Error(`알 수 없는 옵션: ${a}`);
     else if (opts.input === null) opts.input = a;
@@ -36,10 +46,10 @@ function listLuaFiles(dir) {
   return out.sort();
 }
 
-function obfuscateFile(inPath, outPath, check) {
+function obfuscateFile(inPath, outPath, check, density, dialect) {
   const src = readFileSync(inPath, 'utf8');
-  const { code, vm, raw } = obfuscateDetailed(src);
-  const summary = `${inPath} → VM 구간 ${vm}개, 원문 구간 ${raw}개`;
+  const { code, vm, raw, dialect: used } = obfuscateDetailed(src, { density, dialect });
+  const summary = `${inPath} → 방언 ${used}, VM 구간 ${vm}개, 원문 구간 ${raw}개`;
   if (!check) {
     mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, code, 'utf8');
@@ -47,7 +57,7 @@ function obfuscateFile(inPath, outPath, check) {
   } else {
     console.log(summary);
   }
-  return { vm, raw };
+  return { vm, raw, dialect: used };
 }
 
 function main() {
@@ -67,7 +77,7 @@ function main() {
     for (const file of files) {
       const rel = file.slice(input.length + 1);
       try {
-        obfuscateFile(file, opts.check ? file : join(resolve(opts.out), rel), opts.check);
+        obfuscateFile(file, opts.check ? file : join(resolve(opts.out), rel), opts.check, opts.density, opts.dialect);
       } catch (e) {
         failed++;
         console.error(`실패: ${file}: ${e.message}`);
@@ -82,7 +92,7 @@ function main() {
     : opts.out
       ? resolve(opts.out)
       : join(dirname(input), basename(input, '.lua') + '.obf.lua');
-  obfuscateFile(input, outPath, opts.check);
+  obfuscateFile(input, outPath, opts.check, opts.density, opts.dialect);
 }
 
 try {
