@@ -77,7 +77,7 @@ local response = request_fn({
 	Url = "${origin}/api/key-run",
 	Method = "POST",
 	Headers = { ["Content-Type"] = "application/json" },
-	Body = '{"slug":"${slug}","key":"' .. script_key .. '","hwid":"' .. hwid .. '"}'
+	Body = game:GetService("HttpService"):JSONEncode({ slug = "${slug}", key = script_key, hwid = hwid })
 })
 assert(response and response.StatusCode == 200, "스크립트 키 검증에 실패했습니다")
 local data = game:GetService("HttpService"):JSONDecode(response.Body)
@@ -152,7 +152,8 @@ export default {
       if (path === '/api/key-run' && method === 'POST') return keyRun(request, env, await readBody(request));
       if (path.startsWith('/api/')) return withCors(await handleApi(request, env, url));
       if (path === '/admin' || path === '/admin/') {
-        return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/admin', url), request)) : plain('Not found', 404);
+        // html_handling 이 "none" 이라 /admin 은 admin.html 파일로 직접 요청해야 한다
+        return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/admin.html', url), request)) : plain('Not found', 404);
       }
       if (method === 'GET' && env.ASSETS) {
         const asset = await env.ASSETS.fetch(request);
@@ -392,7 +393,7 @@ async function dashboard(env) {
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
   const obf = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM api_audit_logs WHERE action = 'script.obfuscate' AND created_at >= ?"
+    "SELECT COUNT(*) AS n FROM api_audit_logs WHERE action = 'script.obfuscate' AND status = 'ok' AND created_at >= ?"
   ).bind(monthStart).first();
   return json({
     ok: true,
@@ -726,10 +727,13 @@ async function keyRunCore(request, env, body) {
     return json({ ok: true, code: await object.text() });
   }
 
+  // 차단된 계정이 발급받은 스크립트 키도 함께 막는다
   const row = await env.DB.prepare(
-    'SELECT id, user_id, status, expires_at, hwid FROM script_keys WHERE key_hash = ? AND script_id = ?'
+    `SELECT sk.id, sk.user_id, sk.status, sk.expires_at, sk.hwid, u.status AS user_status
+     FROM script_keys sk JOIN api_users u ON u.id = sk.user_id
+     WHERE sk.key_hash = ? AND sk.script_id = ?`
   ).bind(await sha256Hex(body.key.trim()), script.id).first();
-  const valid = row && row.status === 'active' && !isExpired(row.expires_at);
+  const valid = row && row.status === 'active' && row.user_status === 'active' && !isExpired(row.expires_at);
   if (!valid) {
     await audit(env, request, null, 'script.key_run', script.id, 'denied');
     return fail(403, 'Invalid or inactive script key.');

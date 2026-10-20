@@ -209,18 +209,31 @@ function compileSegments(src) {
   const patch = (idx) => { cur.code[idx].a = cur.code.length; };
   const lastOp = () => (cur.code.length ? cur.code[cur.code.length - 1].op : null);
 
+  // true when the last primary parsed was a bare call like f(x), with no parentheses around it
+  let bareCall = false;
+  // A call that is the last argument passes on all of its results (Lua expands them into the outer call).
+  // Any other call keeps only its first result. The inner call is retagged CALLM, the outer one is CALLV.
+  const MULTI = { CALL: 'CALLM', CALLV: 'CALLVM' };
   function callArgs() {
     expect('(');
     let n = 0;
+    let expand = false;
     if (peek().t !== ')') {
-      do { expr(1); n++; } while (peek().t === ',' && next());
+      do { expand = expr(1); n++; } while (peek().t === ',' && next());
     }
     expect(')');
-    emit('CALL', n);
+    if (expand) {
+      const inner = cur.code[cur.code.length - 1];
+      inner.op = MULTI[inner.op];
+      emit('CALLV', n - 1);
+    } else {
+      emit('CALL', n);
+    }
   }
 
   function primary() {
     const t = peek();
+    bareCall = false;
     switch (t.t) {
       case 'num': case 'str': next(); emit('PUSHK', K(t.v)); return;
       case 'true': next(); emit('PUSHK', K(true)); return;
@@ -230,21 +243,24 @@ function compileSegments(src) {
         next();
         checkName(t.v);
         emit('GETG', K(t.v));
-        if (peek().t === '(') callArgs();
+        if (peek().t === '(') { callArgs(); bareCall = true; }
         return;
-      case '(': next(); expr(1); expect(')'); return;
+      case '(': next(); expr(1); expect(')'); bareCall = false; return;
       default: fail(`unexpected "${t.t}"`);
     }
   }
 
+  // returns true when the whole expression is one bare call (the only form whose results can expand)
   function expr(minP) {
     const u = peek().t;
+    let bare = false;
     if (UNARY.has(u)) {
       next();
       expr(7);
       emit('UN', UN_ID[UNARY.get(u)]);
     } else {
       primary();
+      bare = bareCall;
     }
     for (;;) {
       const op = peek().t;
@@ -257,11 +273,14 @@ function compileSegments(src) {
         emit('POP');
         expr(pr + 1);
         patch(j);
+        bare = false;
         continue;
       }
       expr(RIGHT.has(op) ? pr : pr + 1);
       emit('BIN', BIN_ID[BIN_OP.get(op)]);
+      bare = false;
     }
+    return bare;
   }
 
   function block(ends) {
@@ -322,8 +341,7 @@ function compileSegments(src) {
         next();
         if (peek().t === '=') { checkName(t.v); next(); expr(1); emit('SETG', K(t.v)); return; }
         p--;
-        expr(1);
-        if (lastOp() !== 'CALL') fail('not a call statement');
+        if (!expr(1)) fail('not a call statement');
         emit('POP');
         return;
       }
@@ -368,7 +386,8 @@ function compileSegments(src) {
   return segments;
 }
 
-const OPNAMES = ['PUSHK', 'GETG', 'SETG', 'BIN', 'UN', 'JMP', 'JMPF', 'JMPT', 'DUP', 'CALL', 'POP', 'RET', 'HALT'];
+const OPNAMES = ['PUSHK', 'GETG', 'SETG', 'BIN', 'UN', 'JMP', 'JMPF', 'JMPT', 'DUP', 'CALL', 'POP', 'RET', 'HALT',
+  'CALLM', 'CALLV', 'CALLVM'];
 
 function shuffle(arr) {
   const a = arr.slice();
@@ -434,12 +453,26 @@ local function ${name}(K, C)
   H[${OP.JMPF}] = function(a) local c = pop(); if c == nil or c == false then pc = a * 2 + 1 end end
   H[${OP.JMPT}] = function(a) local c = pop(); if c ~= nil and c ~= false then pc = a * 2 + 1 end end
   H[${OP.DUP}] = function() push(stack[sp]) end
-  H[${OP.CALL}] = function(n)
+  local nres = 0
+  local function pack(...) return { n = select("#", ...), ... } end
+  local function call(n, expand, multi)
+    local total = n
+    if expand then total = n + nres end
     local args = {}
-    for i = n, 1, -1 do args[i] = pop() end
+    for i = total, 1, -1 do args[i] = pop() end
     local f = pop()
-    push(f(table.unpack(args, 1, n)))
+    if multi then
+      local r = pack(f(table.unpack(args, 1, total)))
+      for i = 1, r.n do push(r[i]) end
+      nres = r.n
+    else
+      push((f(table.unpack(args, 1, total))))
+    end
   end
+  H[${OP.CALL}] = function(n) call(n, false, false) end
+  H[${OP.CALLM}] = function(n) call(n, false, true) end
+  H[${OP.CALLV}] = function(n) call(n, true, false) end
+  H[${OP.CALLVM}] = function(n) call(n, true, true) end
   H[${OP.POP}] = function() pop() end
   H[${OP.RET}] = function() return "ret" end
   H[${OP.HALT}] = function() return "halt" end
