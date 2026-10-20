@@ -30,6 +30,7 @@ h1{margin:6px 0 0;font-size:22px;line-height:30px;font-weight:700;letter-spacing
 .metrics.is-projects{grid-template-columns:repeat(2,minmax(0,1fr))}
 .metrics.is-users .only-projects,.metrics.is-projects .only-users{display:none}
 .metrics.is-keys{grid-template-columns:repeat(2,minmax(0,1fr))}
+.metrics.is-profile{display:none}
 .metrics.is-keys .only-projects,.metrics.is-keys .only-banned{display:none}
 .field select{width:100%;padding:14px 16px;border:1px solid rgba(255,255,255,.16);border-radius:14px;background:rgba(0,0,0,.35);color:var(--text);font:400 15px Inter,sans-serif;outline:0}
 .field select:focus{border-color:rgba(229,231,235,.6);box-shadow:0 0 0 3px rgba(229,231,235,.12)}
