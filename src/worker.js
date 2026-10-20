@@ -11,7 +11,6 @@ const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const SCRIPT_LIMIT = 18;
 const USER_LIMIT = 10000;
-const OBF_LIMIT = 3000;
 const MAX_FILES = 10;
 const BATCH_LIMIT = 300;
 const PROJECT_NAME_MAX = 60;
@@ -91,9 +90,6 @@ const isBrowserNavigation = (request) =>
 // 구형 모바일 브라우저는 sec-fetch 헤더를 보내지 않으므로 Accept의 text/html도 브라우저로 본다.
 const isBrowserRequest = (request) =>
   isBrowserNavigation(request) || (request.headers.get('accept') || '').includes('text/html');
-const KEY_RUN_FAIL_LIMIT = 30;
-const KEY_RUN_WINDOW_MS = 10 * 60 * 1000;
-const KEY_RUN_BLOCK_MS = 10 * 60 * 1000;
 const expiresFromDays = (value) => {
   if (value === undefined || value === null) return { ok: true, expiresAt: null };
   const days = Number(value);
@@ -223,7 +219,6 @@ async function handleApi(request, env, url) {
   }
 
   if (path === '/api/projects' && method === 'GET') {
-    if (!manager) return forbidden();
     return json({ ok: true, projects: await listProjects(env) });
   }
   if (path === '/api/projects' && method === 'POST') {
@@ -295,32 +290,26 @@ async function handleApi(request, env, url) {
     return json({ ok: true, scripts: results });
   }
   if (path === '/api/scripts' && method === 'POST') {
-    if (!manager) return forbidden();
     return createScript(request, env, auth, await readBody(request));
   }
   const scriptMatch = path.match(/^\/api\/scripts\/([A-Za-z0-9_-]{8,40})$/);
   if (scriptMatch && method === 'PATCH') {
-    if (!manager) return forbidden();
     return updateScript(request, env, auth, scriptMatch[1], await readBody(request));
   }
   if (scriptMatch && method === 'DELETE') {
-    if (!manager) return forbidden();
     return deleteScript(request, env, auth, scriptMatch[1]);
   }
   const scriptKeysMatch = path.match(/^\/api\/scripts\/([A-Za-z0-9_-]{8,40})\/keys$/);
   if (scriptKeysMatch && method === 'POST') return issueScriptKey(request, env, auth, scriptKeysMatch[1], await readBody(request));
   const scriptFilesMatch = path.match(/^\/api\/scripts\/([A-Za-z0-9_-]{8,40})\/files$/);
   if (scriptFilesMatch && method === 'GET') {
-    if (!manager) return forbidden();
     return listScriptFiles(env, scriptFilesMatch[1]);
   }
   if (scriptFilesMatch && method === 'POST') {
-    if (!manager) return forbidden();
     return uploadScriptFile(request, env, auth, scriptFilesMatch[1], await readBody(request));
   }
   const scriptFileMatch = path.match(/^\/api\/script-files\/([A-Za-z0-9_-]{8,40})$/);
   if (scriptFileMatch && method === 'DELETE') {
-    if (!manager) return forbidden();
     return deleteScriptFile(request, env, auth, scriptFileMatch[1]);
   }
 
@@ -382,7 +371,7 @@ async function dashboard(env) {
     scripts,
     banned_ips: bannedIps,
     total_users: Number(totalUsers?.n || 0),
-    usage: { obfuscations: Number(obf?.n || 0), limit: OBF_LIMIT, month_start: monthStart },
+    usage: { obfuscations: Number(obf?.n || 0), limit: null, month_start: monthStart },
     limits: { scripts_per_project: SCRIPT_LIMIT, users: USER_LIMIT }
   });
 }
@@ -660,54 +649,9 @@ async function serveRaw(request, env, kind, value) {
   return new Response(object.body, { headers: { ...TEXT_HEADERS, 'content-disposition': contentDisposition(row.slug), 'x-script-sha256': row.sha256 } });
 }
 
-// IP별 키 검증 실패 횟수 관리. 테이블이 없어도(마이그레이션 전) 실행은 막지 않는다.
-async function keyRunBlocked(env, ip) {
-  if (!ip) return false;
-  try {
-    const row = await env.DB.prepare('SELECT blocked_until FROM key_run_failures WHERE ip = ?').bind(ip).first();
-    return !!row?.blocked_until && Date.parse(row.blocked_until) > Date.now();
-  } catch (error) {
-    console.error('Key run block check failed:', error);
-    return false;
-  }
-}
-
-async function recordKeyRunFailure(env, ip) {
-  if (!ip) return;
-  try {
-    const now = Date.now();
-    const row = await env.DB.prepare('SELECT fail_count, window_start FROM key_run_failures WHERE ip = ?').bind(ip).first();
-    const inWindow = row && Date.parse(row.window_start) > now - KEY_RUN_WINDOW_MS;
-    const count = inWindow ? row.fail_count + 1 : 1;
-    const windowStart = inWindow ? row.window_start : new Date(now).toISOString();
-    const locked = count >= KEY_RUN_FAIL_LIMIT;
-    const blockedUntil = locked ? new Date(now + KEY_RUN_BLOCK_MS).toISOString() : null;
-    await env.DB.prepare(
-      `INSERT INTO key_run_failures (ip, fail_count, window_start, blocked_until) VALUES (?,?,?,?)
-       ON CONFLICT(ip) DO UPDATE SET fail_count = excluded.fail_count, window_start = excluded.window_start, blocked_until = excluded.blocked_until`
-    ).bind(ip, locked ? 0 : count, locked ? new Date(now).toISOString() : windowStart, blockedUntil).run();
-  } catch (error) {
-    console.error('Key run failure record failed:', error);
-  }
-}
-
-async function clearKeyRunFailures(env, ip) {
-  if (!ip) return;
-  try {
-    await env.DB.prepare('DELETE FROM key_run_failures WHERE ip = ?').bind(ip).run();
-  } catch (error) {
-    console.error('Key run failure clear failed:', error);
-  }
-}
-
 async function keyRun(request, env, body) {
   if (isBrowserRequest(request)) return plain('403 Forbidden', 403);
-  const ip = request.headers.get('cf-connecting-ip');
-  if (await keyRunBlocked(env, ip)) return fail(429, '검증 실패가 너무 많습니다. 10분 후 다시 시도하세요.');
-  const response = await keyRunCore(request, env, body);
-  if (response.status === 200) await clearKeyRunFailures(env, ip);
-  else if (response.status >= 400 && response.status < 500) await recordKeyRunFailure(env, ip);
-  return response;
+  return keyRunCore(request, env, body);
 }
 
 async function keyRunCore(request, env, body) {
