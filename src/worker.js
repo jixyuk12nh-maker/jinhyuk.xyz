@@ -6,7 +6,7 @@ const ROLES = ['owner', 'admin', 'user'];
 const MODES = ['keyless', 'key'];
 const POLICIES = ['open', 'closed'];
 const KEY_STATUSES = ['active', 'suspended'];
-const RESERVED = ['api', 'raw', 'assets', 'admin', 'favicon.ico', 'robots.txt'];
+const RESERVED = ['api', 'raw', 'assets', 'admin', 'login', 'favicon.ico', 'robots.txt'];
 const SLUG_RE = /^[\p{L}\p{N}_-]{1,56}(\.lua)?$/u;
 const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -153,6 +153,10 @@ export default {
       if (path.startsWith('/api/')) return withCors(await handleApi(request, env, url));
       if (path === '/admin' || path === '/admin/') {
         return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/admin', url), request)) : plain('Not found', 404);
+      }
+      if (method === 'GET' && env.ASSETS) {
+        const asset = await env.ASSETS.fetch(request);
+        if (asset.status !== 404) return asset;
       }
       const rawId = path.match(/^\/raw\/([A-Za-z0-9_-]{8,40})$/);
       if (rawId && method === 'GET') return await serveRaw(request, env, 'id', rawId[1]);
