@@ -9,7 +9,9 @@
     "db:migrate:local": "wrangler d1 migrations apply tm-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply tm-db --remote",
     "owner:create": "node scripts/create-owner.mjs",
-    "check": "node --check src/worker.js && node --check public/app.js && node --check scripts/create-owner.mjs"
+    "obfuscate": "node scripts/obfuscate.mjs",
+    "test": "node --test tests/obfuscator.test.mjs",
+    "check": "node --check src/worker.js && node --check src/obfuscator.js && node --check public/app.js && node --check scripts/create-owner.mjs && node --check scripts/obfuscate.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

@@ -25,6 +25,44 @@ API 키는 앱사이트 로그인용이며, 프로젝트별로 Users 탭에서 �
 - 소유자 로더: `loader.lua`처럼 `.lua`로 끝나는 슬러그로 키리스 스크립트를 만들면 `https://jinhyuk.xyz/loader.lua`로 받을 수 있습니다.
 - 한글 슬러그는 입력한 그대로 주소가 됩니다. Roblox 실행기에서 한글 주소가 열리는지는 실제 테스트가 필요합니다.
 
+## 난독화 (스크립트 저장 시 자동 적용)
+스크립트를 저장하면 `src/obfuscator.js`의 내장 VM 난독화기가 원문을 바이트코드 VM 코드로 바꿉니다.
+- 원문: R2의 `scripts/<id>.raw.lua` (작성자와 소유자의 `POST /api/execute`에서만 나옴)
+- 난독화본: R2의 `scripts/<id>.lua` (로드스트링, 키 모드 검증 응답)
+
+저장 순서는 다음과 같습니다.
+1. 원본을 R2(`raw`)에 먼저 저장합니다.
+2. 원본을 VM 난독화합니다. 실패하면 1단계의 원본을 지우고 저장을 막습니다.
+3. 난독화본을 R2(`obfuscated`)에 저장합니다.
+4. D1에 스크립트 정보를 기록합니다. 실패하면 R2 객체 둘 다 지웁니다.
+
+원본은 관리 화면의 프로필 탭에서 `/api/execute`로 읽고, 난독화본은 로드스트링 주소로 내려갑니다.
+
+R2 객체는 짝으로 저장되며 서로를 메타데이터로 가리킵니다.
+- `scripts/<id>.raw.lua`: `role=raw`, `pair=scripts/<id>.lua`, `scriptId`, `sha256`(원문)
+- `scripts/<id>.lua`: `role=obfuscated`, `obfuscated=1`, `pair=scripts/<id>.raw.lua`, `scriptId`, `sha256`(원문)
+D1의 `hosted_scripts.object_key`와 `raw_object_key`가 기준 연결이고, R2 메타데이터는 R2 콘솔에서 짝을 확인하기 위한 표시입니다.
+
+지원하지 않는 최상위 문장(함수 정의, 테이블, 메서드 호출 등)은 난독화하지 않고 원문 그대로 둡니다.
+외부 서버나 secret 설정은 필요 없습니다. 난독화 중 구문 오류가 나면 422로 저장이 막힙니다.
+마이그레이션 0013(`raw_object_key`, `obfuscated` 컬럼)을 적용해야 합니다. 0013 이전에 저장된 스크립트는 원문 그대로 서빙되므로, 수정 저장하면 난독화본으로 바뀝니다.
+
+## 난독화 도구 (CLI)
+저장 API와 같은 난독화기(`src/obfuscator.js`)를 로컬에서 직접 쓸 수 있습니다.
+```
+npm run obfuscate -- 원본.lua                 # 원본.obf.lua 생성
+npm run obfuscate -- 원본.lua -o 출력.lua      # 출력 경로 지정
+npm run obfuscate -- 원본.lua --check         # 파일을 쓰지 않고 구간 수와 구문만 확인
+npm run obfuscate -- 스크립트폴더 -o 출력폴더    # 폴더 안의 .lua 전부 (하나라도 실패하면 종료 코드 1)
+```
+출력에는 `VM 구간 N개, 원문 구간 M개`가 나옵니다. 원문 구간이 많으면 난독화되지 않은 부분이 많다는 뜻입니다.
+
+## 테스트
+```
+npm test
+```
+`node --test`로 난독화기를 검사합니다. Lua 실행기(`lua5.4`, `lua5.3`, `lua`, `texlua` 중 하나)가 있으면 원본과 난독화본의 실행 결과도 비교합니다. 없으면 그 테스트만 건너뜁니다.
+
 ## 배포
 1. D1 스키마를 확인합니다. `api_users`나 `api_keys`가 이미 있다면 구조를 먼저 확인하세요.
    `npx wrangler d1 execute tm-db --remote --command "SELECT name FROM sqlite_master WHERE type='table';"`
