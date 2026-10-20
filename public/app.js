@@ -37,7 +37,8 @@
     keys: 'keysModal',
     account: 'accountModal',
     issueKey: 'issueKeyModal',
-    scriptKeys: 'scriptKeysModal'
+    scriptKeys: 'scriptKeysModal',
+    manageKeys: 'manageKeysModal'
   };
 
   const fmtSize = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
@@ -330,6 +331,7 @@
 
   function scriptRow(s) {
     const tr = document.createElement('tr');
+    tr.dataset.mode = s.mode || 'keyless';
     tr.dataset.id = s.id;
     tr.innerHTML =
       '<td><div class="script"><span class="file" aria-hidden="true">&lt;/&gt;</span><div class="script-text"><span class="name"></span><small></small></div></div></td>' +
@@ -1006,9 +1008,10 @@
   function renderScriptKeyView() {
     const list = $('scriptKeyProjectList');
     list.textContent = '';
-    $('scriptKeysEmpty').hidden = db.projects.length > 0;
-    db.projects.forEach((p) => {
-      const live = projectScriptKeys(p.id).filter((k) => k.status === 'active').length;
+    const loaders = db.projects.flatMap((p) => projectKeyScripts(p.id).map((s) => ({ p, s })));
+    $('scriptKeysEmpty').hidden = loaders.length > 0;
+    loaders.forEach(({ p, s }) => {
+      const live = db.scriptKeys.filter((k) => k.script_id === s.id && k.status === 'active').length;
       const row = document.createElement('article');
       row.className = 'user-row';
 
@@ -1018,73 +1021,92 @@
       const text = document.createElement('div');
       text.className = 'project-text';
       const h = document.createElement('h3');
-      h.textContent = p.name;
+      h.textContent = s.name;
       const sub = document.createElement('p');
-      sub.textContent = countLabel(live, 'active key') + ' · ' + countLabel(projectKeyScripts(p.id).length, 'key script');
+      sub.textContent = p.name + ' · ' + countLabel(live, 'active key');
       text.append(h, sub);
       info.appendChild(text);
 
       const actions = document.createElement('div');
       actions.className = 'panel-actions';
       actions.innerHTML =
-        '<button class="btn primary" data-action="add-script-key" data-project="' + p.id + '">+ ADD KEY</button>' +
-        '<button class="btn" data-action="edit-script-keys" data-project="' + p.id + '">EDIT KEYS</button>' +
-        '<button class="btn icon" aria-label="Manage script keys" data-action="manage-script-keys" data-project="' + p.id + '">' + GEAR + '</button>';
+        '<button class="btn primary" data-action="add-script-key" data-project="' + p.id + '" data-script="' + s.id + '">+ ADD KEY</button>' +
+        '<button class="btn" data-action="edit-script-keys" data-project="' + p.id + '" data-script="' + s.id + '">EDIT KEYS</button>' +
+        '<button class="btn icon" aria-label="Manage script keys" data-action="manage-script-keys" data-project="' + p.id + '" data-script="' + s.id + '">' + GEAR + '</button>';
 
       row.append(info, actions);
       list.appendChild(row);
     });
   }
 
-  function openIssueKey(projectId) {
+  function openIssueKey(projectId, scriptId) {
     const p = project(projectId);
     if (!p) return;
     const scripts = projectKeyScripts(p.id);
-    if (!scripts.length) {
-      toast('This project has no key-mode scripts. Set a script to key mode first.');
+    let script = scriptId ? scripts.find((s) => s.id === scriptId) : null;
+    if (!script && scripts.length === 1) script = scripts[0];
+    if (!script) {
+      toast('Use ADD KEY on the loader you want to issue keys for.');
       return;
     }
     ctxId = p.id;
-    $('issueKeyTitle').textContent = 'Create Script Key For ' + p.name;
-    const sel = $('skScript');
-    sel.textContent = '';
-    scripts.forEach((s) => {
-      const o = document.createElement('option');
-      o.value = s.id;
-      o.textContent = s.name + ' (' + s.slug + ')';
-      sel.appendChild(o);
-    });
-    $('skDays').value = '';
+    skEditId = null;
+    skLastToken = null;
+    skScriptId = script.id;
+    $('issueKeyTitle').textContent = 'Add Key To ' + script.name;
+    $('skDiscord').value = '';
+    $('skMemo').value = '';
+    $('skExpire').value = '';
+    $('skExpireRow').hidden = false;
+    $('skDownload').hidden = true;
     banner('issueKeyBanner', '');
-    openDialog('issueKey', '#skScript');
+    openDialog('issueKey', '#skDiscord');
+  }
+
+  function openEditKey(id) {
+    const k = db.scriptKeys.find((x) => x.id === id);
+    if (!k) return;
+    skEditId = id;
+    skScriptId = k.script_id;
+    $('issueKeyTitle').textContent = 'Edit Key · ' + k.slug;
+    $('skDiscord').value = k.discord_id || '';
+    $('skMemo').value = k.memo || '';
+    $('skExpireRow').hidden = true;
+    $('skDownload').hidden = true;
+    banner('issueKeyBanner', '');
+    openDialog('issueKey', '#skDiscord');
   }
 
   async function saveScriptKey(button) {
     if (busy) return toast(BUSY_MSG);
-    const scriptId = $('skScript').value;
-    const raw = $('skDays').value.trim();
-    const days = raw === '' ? undefined : Number(raw);
+    if (skEditId) return saveKeyMeta(button);
+    const scriptId = skScriptId;
     if (!scriptId) {
-      banner('issueKeyBanner', 'Select a script first.', 'error');
+      banner('issueKeyBanner', 'Open Add Key from a loader.', 'error');
       return;
     }
-    if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > 3650)) {
-      banner('issueKeyBanner', 'Expiry must be 1 to 3650 days, or empty for no expiry.', 'error');
-      $('skDays').focus();
+    const minutes = expiryMinutes($('skExpire').value);
+    const err = expiryError(minutes);
+    if (err) {
+      banner('issueKeyBanner', err, 'error');
+      $('skExpire').focus();
       return;
     }
+    const body = { memo: $('skMemo').value, discord_id: $('skDiscord').value };
+    if (minutes !== undefined) body.expires_in_minutes = minutes;
     busy = true;
     setBusy(button, true, '✓');
     try {
-      const body = days === undefined ? {} : { expires_in_days: days };
       const data = await api(`/api/scripts/${scriptId}/keys`, { method: 'POST', body: JSON.stringify(body) });
-      const token = data.key.token;
-      const copied = await copyText(token);
-      banner('issueKeyBanner', (copied ? 'Copied. ' : '') + 'Save this key now. It will not be shown again: ' + token, 'ok');
+      skLastToken = data.key.token;
+      skLastSlug = data.key.slug;
+      const copied = await copyText(skLastToken);
+      banner('issueKeyBanner', (copied ? 'Copied. ' : '') + 'Save this key now. It will not be shown again: ' + skLastToken, 'ok');
+      $('skDownload').hidden = false;
       toast('Script key created.');
       await loadKeys();
       renderAll();
-    } catch (error) {
+      } catch (error) {
       banner('issueKeyBanner', error.message, 'error');
     } finally {
       busy = false;
@@ -1092,11 +1114,248 @@
     }
   }
 
-  function openScriptKeys(projectId) {
+  async function saveKeyMeta(button) {
+    busy = true;
+    setBusy(button, true, '✓');
+    let ok = false;
+    try {
+      await api(`/api/script-keys/${skEditId}`, { method: 'PATCH', body: JSON.stringify({ memo: $('skMemo').value, discord_id: $('skDiscord').value }) });
+      toast('Key updated.');
+      await loadKeys();
+      renderAll();
+      ok = true;
+    } catch (error) {
+      banner('issueKeyBanner', error.message, 'error');
+    } finally {
+      busy = false;
+      setBusy(button, false, '✓');
+    }
+    if (ok) closeDialog();
+  }
+
+  function downloadLastKey() {
+    if (!skLastToken) return;
+    saveBlob((skLastSlug || 'script') + '-key.txt', skLastToken + '\n', 'text/plain');
+  }
+
+  async function exportProjectKeys(format, button) {
+    if (busy) return toast(BUSY_MSG);
+    const p = project(ctxId);
+    if (!p) return;
+    const label = button.textContent;
+    busy = true;
+    setBusy(button, true, label);
+    try {
+      const rows = [];
+      for (const s of projectKeyScripts(p.id)) {
+        const data = await api(`/api/scripts/${s.id}/keys/export`);
+        (data.keys || []).forEach((k) => rows.push({ script: data.slug, key: k.token, status: k.status, expires_at: k.expires_at }));
+      }
+      if (!rows.length) {
+        toast('No downloadable keys in this project.');
+        return;
+      }
+      if (format === 'txt') saveBlob(p.name + '-keys.txt', rows.map((r) => r.key).join('\n') + '\n', 'text/plain');
+      else saveBlob(p.name + '-keys.json', JSON.stringify(rows, null, 2), 'application/json');
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      busy = false;
+      setBusy(button, false, label);
+    }
+  }
+
+  let mkFile = null;
+
+  let mkScriptId = null;
+
+  function openManageKeys(projectId, scriptId) {
+    const p = project(projectId);
+    if (!p) return;
+    const scripts = projectKeyScripts(p.id);
+    const script = scriptId ? scripts.find((s) => s.id === scriptId) : scripts.length === 1 ? scripts[0] : null;
+    if (!script) {
+      toast(scripts.length ? 'Open the gear from the loader you want to manage.' : 'This project has no key-mode scripts. Set a script to key mode first.');
+      return;
+    }
+    ctxId = p.id;
+    mkScriptId = script.id;
+    mkFile = null;
+    $('mkImportFile').value = '';
+    $('mkImportName').textContent = 'No file selected.';
+    banner('manageKeysBanner', '');
+    renderManageKeys();
+    openDialog('manageKeys', '#mkAmount');
+  }
+
+  function renderManageKeys() {
+    const scriptId = mkScriptId;
+    const count = db.scriptKeys.filter((k) => k.script_id === scriptId).length;
+    $('mkKeyCount').textContent = count + ' keys in this script';
+  }
+
+  function saveBlob(name, text, type) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function generateManageKeys(button) {
+    if (busy) return toast(BUSY_MSG);
+    const scriptId = mkScriptId;
+    const amount = Number($('mkAmount').value);
+    if (!Number.isInteger(amount) || amount < 1 || amount > 2500) {
+      banner('manageKeysBanner', 'Amount must be 1 to 2500.', 'error');
+      return;
+    }
+    const minutes = expiryMinutes($('mkExpire').value);
+    const err = expiryError(minutes);
+    if (err) {
+      banner('manageKeysBanner', err, 'error');
+      return;
+    }
+    busy = true;
+    setBusy(button, true, 'GENERATE');
+    let made = 0;
+    let failure = null;
+    try {
+      while (made < amount) {
+        const body = { count: Math.min(300, amount - made) };
+        if (minutes !== undefined) body.expires_in_minutes = minutes;
+        const data = await api(`/api/scripts/${scriptId}/keys/bulk`, { method: 'POST', body: JSON.stringify(body) });
+        made += data.count;
+      }
+    } catch (error) {
+      failure = error.message;
+    } finally {
+      busy = false;
+      setBusy(button, false, 'GENERATE');
+    }
+    if (made) {
+      banner('manageKeysBanner', made + ' keys generated. Use DOWNLOAD to save them.', 'ok');
+      toast(made + ' script keys created.');
+      await loadKeys();
+      renderAll();
+      renderManageKeys();
+    }
+    if (failure) banner('manageKeysBanner', failure, 'error');
+  }
+
+  async function downloadManageKeys(format, button) {
+    if (busy) return toast(BUSY_MSG);
+    const label = button.textContent;
+    busy = true;
+    setBusy(button, true, label);
+    try {
+      const data = await api(`/api/scripts/${mkScriptId}/keys/export`);
+      const list = data.keys || [];
+      if (!list.length) {
+        banner('manageKeysBanner', 'No downloadable keys in this script.', 'error');
+        return;
+      }
+      if (format === 'txt') {
+        saveBlob(data.slug + '-keys.txt', list.map((k) => k.token).join('\n') + '\n', 'text/plain');
+      } else {
+        saveBlob(data.slug + '-keys.json', JSON.stringify(list.map((k) => ({ key: k.token, status: k.status, expires_at: k.expires_at })), null, 2), 'application/json');
+      }
+    } catch (error) {
+      banner('manageKeysBanner', error.message, 'error');
+    } finally {
+      busy = false;
+      setBusy(button, false, label);
+    }
+  }
+
+  async function deleteUnusedManageKeys(button) {
+    if (busy) return toast(BUSY_MSG);
+    if (!window.confirm('Delete every key in this script that has never been used?')) return;
+    const label = button.textContent;
+    busy = true;
+    setBusy(button, true, label);
+    try {
+      const data = await api(`/api/scripts/${mkScriptId}/keys/unused`, { method: 'DELETE' });
+      banner('manageKeysBanner', data.removed + ' unused keys deleted.', 'ok');
+      await loadKeys();
+      renderAll();
+      renderManageKeys();
+    } catch (error) {
+      banner('manageKeysBanner', error.message, 'error');
+    } finally {
+      busy = false;
+      setBusy(button, false, label);
+    }
+  }
+
+  function parseJsonKeys(text) {
+    const data = JSON.parse(text);
+    const arr = Array.isArray(data) ? data : Array.isArray(data.keys) ? data.keys : [];
+    return arr
+      .map((item) => (typeof item === 'string' ? item : item && (item.key || item.token)))
+      .filter((v) => typeof v === 'string' && v.trim())
+      .map((v) => v.trim());
+  }
+
+  async function importManageKeys(button) {
+    if (busy) return toast(BUSY_MSG);
+    if (!mkFile) {
+      banner('manageKeysBanner', 'Choose a file first.', 'error');
+      return;
+    }
+    let keys;
+    try {
+      const text = await mkFile.text();
+      keys = mkFile.name.toLowerCase().endsWith('.json')
+        ? parseJsonKeys(text)
+        : text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    } catch {
+      banner('manageKeysBanner', 'Could not read this file.', 'error');
+      return;
+    }
+    if (!keys.length) {
+      banner('manageKeysBanner', 'No keys found in this file.', 'error');
+      return;
+    }
+    const scriptId = mkScriptId;
+    const label = button.textContent;
+    busy = true;
+    setBusy(button, true, label);
+    let added = 0;
+    let duplicates = 0;
+    let skipped = 0;
+    try {
+      for (let i = 0; i < keys.length; i += 300) {
+        const entries = keys.slice(i, i + 300).map((key) => ({ key }));
+        const data = await api(`/api/scripts/${scriptId}/keys/import`, { method: 'POST', body: JSON.stringify({ entries }) });
+        added += data.added;
+        duplicates += data.duplicates;
+        skipped += data.skipped;
+      }
+      banner('manageKeysBanner', `Imported ${added}. Duplicates ${duplicates}, skipped ${skipped}.`, 'ok');
+      await loadKeys();
+      renderAll();
+      renderManageKeys();
+    } catch (error) {
+      banner('manageKeysBanner', error.message, 'error');
+    } finally {
+      busy = false;
+      setBusy(button, false, label);
+    }
+  }
+
+  let ctxScript = null;
+
+  function openScriptKeys(projectId, scriptId) {
     const p = project(projectId);
     if (!p) return;
     ctxId = p.id;
-    $('scriptKeysModalTitle').textContent = 'Script Keys Of ' + p.name;
+    ctxScript = scriptId || null;
+    const s = scriptId ? db.scripts.find((x) => x.id === scriptId) : null;
+    $('scriptKeysModalTitle').textContent = 'Users Of ' + (s ? s.name : p.name);
     $('scriptKeySearch').value = '';
     renderScriptKeys();
     openDialog('scriptKeys', '#scriptKeySearch');
@@ -1106,9 +1365,9 @@
     const list = $('scriptKeyList');
     list.textContent = '';
     const p = project(ctxId);
-    const keys = p ? projectScriptKeys(p.id) : [];
+    const keys = p ? projectScriptKeys(p.id).filter((k) => !ctxScript || k.script_id === ctxScript) : [];
     const q = $('scriptKeySearch').value.trim().toLowerCase();
-    const matches = keys.filter((k) => !q || [k.slug, k.key_prefix, k.username].some((v) => (v || '').toLowerCase().includes(q)));
+    const matches = keys.filter((k) => !q || [k.slug, k.key_prefix, k.username, k.discord_id, k.memo].some((v) => (v || '').toLowerCase().includes(q)));
     $('scriptKeyCount').textContent = keys.length ? '(' + matches.length + ' / ' + keys.length + ')' : '';
     if (!keys.length) {
       list.innerHTML = '<div class="key-empty">No script keys yet. Use + ADD KEY to create one.</div>';
@@ -1142,6 +1401,12 @@
       const code = document.createElement('code');
       code.textContent = k.key_prefix + '…';
       info.append(title, meta, code);
+      if (k.discord_id || k.memo) {
+        const note = document.createElement('div');
+        note.className = 'key-meta';
+        note.textContent = [k.discord_id ? 'Discord ' + k.discord_id : '', k.memo].filter(Boolean).join(' · ');
+        info.appendChild(note);
+      }
 
       const actions = document.createElement('div');
       actions.className = 'key-actions';
@@ -1152,6 +1417,7 @@
       if (k.status === 'active') actions.appendChild(mk('SUSPEND', 'suspend', k.id));
       if (k.status === 'suspended') actions.appendChild(mk('RESUME', 'resume', k.id));
       if (k.hwid_bound) actions.appendChild(mk('RESET HWID', 'reset-hwid', k.id));
+      if (db.role !== 'user') actions.appendChild(mk('EDIT', 'edit-script', k.id));
       if (k.status !== 'revoked') actions.appendChild(mk('REVOKE', 'revoke-script', k.id));
 
       row.append(info, actions);
@@ -1162,6 +1428,10 @@
   async function scriptKeyAction(action, id) {
     const k = db.scriptKeys.find((x) => x.id === id);
     if (!k) return;
+    if (action === 'edit-script') {
+      openEditKey(id);
+      return;
+    }
     try {
       if (action === 'suspend' || action === 'resume') {
         await api(`/api/script-keys/${id}`, { method: 'PATCH', body: JSON.stringify({ status: action === 'suspend' ? 'suspended' : 'active' }) });
@@ -1213,9 +1483,9 @@
       case 'add-user': openCreateKey(btn.dataset.project || ctxId || db.selectedId); break;
       case 'edit-users': openKeys(btn.dataset.project); break;
       case 'manage-users': openKeys(btn.dataset.project); break;
-      case 'add-script-key': openIssueKey(btn.dataset.project); break;
-      case 'edit-script-keys': openScriptKeys(btn.dataset.project); break;
-      case 'manage-script-keys': openScriptKeys(btn.dataset.project); break;
+      case 'add-script-key': openIssueKey(btn.dataset.project, btn.dataset.script); break;
+      case 'edit-script-keys': openScriptKeys(btn.dataset.project, btn.dataset.script); break;
+      case 'manage-script-keys': openManageKeys(btn.dataset.project, btn.dataset.script); break;
       case 'open-account': openAccount(); break;
       case 'view-source': openSource(btn.dataset.id); break;
       case 'open-menu':
@@ -1256,6 +1526,18 @@
   $('clearAll').addEventListener('click', removeApiKey);
   $('keySearch').addEventListener('input', renderKeys);
   $('issueKeySave').addEventListener('click', (e) => saveScriptKey(e.currentTarget));
+  $('skDownload').addEventListener('click', downloadLastKey);
+  $('skListDownloadTxt').addEventListener('click', (e) => exportProjectKeys('txt', e.currentTarget));
+  $('skListExportJson').addEventListener('click', (e) => exportProjectKeys('json', e.currentTarget));
+  $('mkGenerate').addEventListener('click', (e) => generateManageKeys(e.currentTarget));
+  $('mkDownloadTxt').addEventListener('click', (e) => downloadManageKeys('txt', e.currentTarget));
+  $('mkExportJson').addEventListener('click', (e) => downloadManageKeys('json', e.currentTarget));
+  $('mkDeleteUnused').addEventListener('click', (e) => deleteUnusedManageKeys(e.currentTarget));
+  $('mkImportFile').addEventListener('change', (e) => {
+    mkFile = e.target.files[0] || null;
+    $('mkImportName').textContent = mkFile ? mkFile.name : 'No file selected.';
+  });
+  $('mkImportConfirm').addEventListener('click', (e) => importManageKeys(e.currentTarget));
   $('scriptKeySearch').addEventListener('input', renderScriptKeys);
   $('scriptKeyList').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-key-action]');
@@ -1304,7 +1586,7 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && openDialogId && !e.isComposing && e.target.tagName === 'INPUT') {
-      const submit = { pName: () => saveProject($('projectSave')), uLabel: () => saveKey($('addUserSave')), uReset: () => saveKey($('addUserSave')), apiKey: () => saveApiKey($('apiSave')), setupName: () => createOwner($('setupCreate')), skDays: () => saveScriptKey($('issueKeySave')) }[e.target.id];
+      const submit = { pName: () => saveProject($('projectSave')), uLabel: () => saveKey($('addUserSave')), uReset: () => saveKey($('addUserSave')), apiKey: () => saveApiKey($('apiSave')), setupName: () => createOwner($('setupCreate')), skExpire: () => saveScriptKey($('issueKeySave')) }[e.target.id];
       if (submit) { e.preventDefault(); submit(); }
       return;
     }

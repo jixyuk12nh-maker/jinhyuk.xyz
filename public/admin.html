@@ -13,16 +13,22 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<header class="appbar">
+  <a class="brand" href="/">
+    <span class="project-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+    <strong>jinhyuk.xyz</strong>
+  </a>
+  <div class="tools appbar-tools">
+      <button class="icon-btn" aria-label="Notifications" data-action="notify"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.3 16.2h-1.15v-5.02a6.15 6.15 0 0 0-4.6-5.96V4.5a1.55 1.55 0 0 0-3.1 0v.72a6.15 6.15 0 0 0-4.6 5.96v5.02H4.7a.8.8 0 0 0-.57 1.37l1.55 1.57c.15.15.36.24.57.24h11.5c.21 0 .42-.09.57-.24l1.55-1.57a.8.8 0 0 0-.57-1.37ZM12 21a2.4 2.4 0 0 0 2.25-1.55H9.75A2.4 2.4 0 0 0 12 21Z"/></svg></button>
+<button class="icon-btn" aria-label="Account settings" data-action="open-account"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.42 13.1 1.11.86-1.93 3.34-1.3-.52c-.47.35-.99.65-1.55.87l-.19 1.38h-3.85l-.19-1.38c-.56-.22-1.08-.52-1.55-.87l-1.3.52-1.93-3.34 1.11-.86a6.96 6.96 0 0 1 0-1.8l-1.11-.86L8.67 7.1l1.3.52c.47-.35.99-.65 1.55-.87l.19-1.38h3.85l.19 1.38c.56.22 1.08.52 1.55.87l1.3-.52 1.93 3.34-1.11.86c.08.59.08 1.21 0 1.8ZM13.64 14.3a2.95 2.95 0 1 0 0-5.9 2.95 2.95 0 0 0 0 5.9Z"/></svg></button>
+      <button class="icon-btn" id="menuBtn" aria-label="Open menu" aria-expanded="false" aria-controls="drawer" data-action="open-menu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h17v1.9h-17zm0 4.55h17v1.9h-17zm0 4.55h17v1.9h-17z"/></svg></button>
+  </div>
+</header>
 <main class="shell">
   <header class="topbar">
     <div>
       <nav class="breadcrumb" aria-label="Breadcrumb"><span>jinhyuk.xyz</span><span class="slash">/</span><span id="crumb">Projects</span></nav>
       <h1 id="pageTitle">Projects</h1>
-    </div>
-    <div class="tools">
-      <button class="icon-btn" aria-label="Notifications" data-action="notify"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.3 16.2h-1.15v-5.02a6.15 6.15 0 0 0-4.6-5.96V4.5a1.55 1.55 0 0 0-3.1 0v.72a6.15 6.15 0 0 0-4.6 5.96v5.02H4.7a.8.8 0 0 0-.57 1.37l1.55 1.57c.15.15.36.24.57.24h11.5c.21 0 .42-.09.57-.24l1.55-1.57a.8.8 0 0 0-.57-1.37ZM12 21a2.4 2.4 0 0 0 2.25-1.55H9.75A2.4 2.4 0 0 0 12 21Z"/></svg></button>
-      <button class="icon-btn" aria-label="Account settings" data-action="open-account"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.42 13.1 1.11.86-1.93 3.34-1.3-.52c-.47.35-.99.65-1.55.87l-.19 1.38h-3.85l-.19-1.38c-.56-.22-1.08-.52-1.55-.87l-1.3.52-1.93-3.34 1.11-.86a6.96 6.96 0 0 1 0-1.8l-1.11-.86L8.67 7.1l1.3.52c.47-.35.99-.65 1.55-.87l.19-1.38h3.85l.19 1.38c.56.22 1.08.52 1.55.87l1.3-.52 1.93 3.34-1.11.86c.08.59.08 1.21 0 1.8ZM13.64 14.3a2.95 2.95 0 1 0 0-5.9 2.95 2.95 0 0 0 0 5.9Z"/></svg></button>
-      <button class="icon-btn" id="menuBtn" aria-label="Open menu" aria-expanded="false" aria-controls="drawer" data-action="open-menu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h17v1.9h-17zm0 4.55h17v1.9h-17zm0 4.55h17v1.9h-17z"/></svg></button>
     </div>
   </header>
 
@@ -146,7 +152,7 @@
   </div>
   <ul class="nav-list">
     <li><button class="nav-item" data-nav="projects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2.5h7.9l4.1 4.1v13.15a1.75 1.75 0 0 1-1.75 1.75H7A1.75 1.75 0 0 1 5.25 19.75v-15C5.25 3.78 6.03 2.5 7 2.5Zm7.1 1.95v3.22h3.22L14.1 4.45ZM9 11.25h6v1.65H9v-1.65Zm0 3.35h6v1.65H9V14.6Zm0-6.7h3.3v1.65H9V7.9Z"/></svg>Projects</button></li>
-    <li><button class="nav-item" data-nav="profile">👤 Profile</button></li>
+    <li><button class="nav-item" data-nav="profile"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Zm0 2c-4.2 0-7.5 2.1-7.5 4.7V21h15v-2.3c0-2.6-3.3-4.7-7.5-4.7Z"/></svg>Profile</button></li>
     <li><button class="nav-item" data-nav="users"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.1 11.1a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Zm7.7-.35a2.7 2.7 0 1 0 0-5.4 2.7 2.7 0 0 0 0 5.4Zm-7.7 2.1c-3.33 0-6.04 1.9-6.04 4.25 0 .49.4.89.89.89h10.3c.49 0 .89-.4.89-.89 0-2.35-2.71-4.25-6.04-4.25Zm7.55-.15c-.55 0-1.08.07-1.58.2 1.07.92 1.72 2.1 1.72 3.5v1.06h5.25c.49 0 .89-.4.89-.89 0-2.14-2.82-3.87-6.28-3.87Z"/></svg>API Keys</button></li>
     <li><button class="nav-item" data-nav="script-keys"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 2a6.5 6.5 0 0 0-6.2 8.4L2.3 17.4V22h4.6v-2.3h2.3v-2.3h2.3l2.6-2.6A6.5 6.5 0 1 0 15.5 2Zm1.2 5.2a1.6 1.6 0 1 1 0-3.2 1.6 1.6 0 0 1 0 3.2Z"/></svg>Users</button></li>
     <li><button class="nav-item" data-nav="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.42 13.1 1.11.86-1.93 3.34-1.3-.52c-.47.35-.99.65-1.55.87l-.19 1.38h-3.85l-.19-1.38c-.56-.22-1.08-.52-1.55-.87l-1.3.52-1.93-3.34 1.11-.86a6.96 6.96 0 0 1 0-1.8l-1.11-.86L8.67 7.1l1.3.52c.47-.35.99-.65 1.55-.87l.19-1.38h3.85l.19 1.38c.56.22 1.08.52 1.55.87l1.3-.52 1.93 3.34-1.11.86c.08.59.08 1.21 0 1.8ZM13.64 14.3a2.95 2.95 0 1 0 0-5.9 2.95 2.95 0 0 0 0 5.9Z"/></svg>Login</button></li>
@@ -266,21 +272,27 @@
 <div class="backdrop" id="issueKeyModal" aria-hidden="true">
   <section class="modal" role="dialog" aria-modal="true" aria-labelledby="issueKeyTitle">
     <header class="modal-head">
-      <h2 id="issueKeyTitle">Create Script Key</h2>
+      <h2 id="issueKeyTitle">Add Key</h2>
       <div class="modal-actions">
-        <button class="round ok" id="issueKeySave" aria-label="Create script key">✓</button>
+        <button class="round ok" id="issueKeySave" aria-label="Save key">✓</button>
         <button class="round x" data-dialog-close aria-label="Close">×</button>
       </div>
     </header>
     <div class="modal-body">
       <div class="banner" id="issueKeyBanner" role="status" hidden></div>
-      <label class="field">SCRIPT
-        <select id="skScript"></select>
+      <label class="field">DISCORD ID (OPTIONAL)
+        <input id="skDiscord" type="text" inputmode="numeric" maxlength="20" autocomplete="off" />
       </label>
-      <label class="field">EXPIRES IN (DAYS, OPTIONAL)
-        <input id="skDays" type="number" min="1" max="3650" placeholder="Never" />
+      <label class="field">MEMO (OPTIONAL)
+        <textarea id="skMemo" rows="3" maxlength="300" placeholder="Notes about this key"></textarea>
       </label>
-      <p class="hint">Only key-mode scripts are listed. The key is shown once after creation. Each key binds to its own device when HWID Lock is on.</p>
+      <label class="field" id="skExpireRow">EXPIRES IN (EMPTY = PERMANENT)
+        <input id="skExpire" type="text" maxlength="20" autocomplete="off" />
+      </label>
+      <p class="hint">Examples: 30 minutes, 1 hour, 7 days. Leave empty or type permanent for a key that never expires. Minimum 30 minutes.</p>
+      <div class="row-inline">
+        <button class="btn" id="skDownload" hidden>DOWNLOAD TXT</button>
+      </div>
     </div>
   </section>
 </div>
@@ -288,18 +300,72 @@
 <div class="backdrop" id="scriptKeysModal" aria-hidden="true">
   <section class="modal" role="dialog" aria-modal="true" aria-labelledby="scriptKeysModalTitle">
     <header class="modal-head">
-      <h2 id="scriptKeysModalTitle">Script Keys</h2>
+      <h2 id="scriptKeysModalTitle">Users</h2>
       <div class="modal-actions">
         <button class="round x" data-dialog-close aria-label="Close">×</button>
       </div>
     </header>
     <div class="modal-body">
       <div class="block">
-        <p class="section-title">Script Keys <span class="section-count" id="scriptKeyCount"></span></p>
-        <input id="scriptKeySearch" class="search" type="search" placeholder="Search by script, user or key prefix" autocomplete="off" />
+        <p class="section-title">Users <span class="section-count" id="scriptKeyCount"></span></p>
+        <input id="scriptKeySearch" class="search" type="search" placeholder="Search keys, Discord ID or memo" autocomplete="off" />
         <div class="key-list" id="scriptKeyList"></div>
       </div>
+      <div class="block">
+        <p class="section-title">Download keys</p>
+        <p class="hint">Downloads every key of this project that is stored for download.</p>
+        <div class="row-inline">
+          <button class="btn" id="skListDownloadTxt">DOWNLOAD TXT</button>
+          <button class="btn" id="skListExportJson">EXPORT JSON</button>
+        </div>
+      </div>
     </div>
+  </section>
+</div>
+
+<div class="backdrop" id="manageKeysModal" aria-hidden="true">
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="manageKeysTitle">
+    <header class="modal-head">
+      <h2 id="manageKeysTitle">jinhyuk.xyz</h2>
+      <div class="modal-actions">
+        <button class="round x" data-dialog-close aria-label="Close">×</button>
+      </div>
+    </header>
+    <div class="modal-body">
+      <div class="banner" id="manageKeysBanner" role="status" hidden></div>
+      <div class="block">
+        <p class="section-title">Mass Generate Keys <span class="section-count">- Up to 2500 at once</span></p>
+        <div class="row-inline">
+          <label class="field">AMOUNT (1 - 2500)
+            <input id="mkAmount" type="number" min="1" max="2500" value="10" />
+          </label>
+          <label class="field">EXPIRES IN (EMPTY = PERMANENT)
+            <input id="mkExpire" type="text" maxlength="20" autocomplete="off" />
+          </label>
+          <button class="btn primary" id="mkGenerate">GENERATE</button>
+        </div>
+      </div>
+      <div class="block">
+        <p class="section-title">Download keys</p>
+        <p class="hint">Useful for sellix / shoppy serial keys. JSON is recommended for migrating users.</p>
+        <div class="row-inline">
+          <button class="btn" id="mkDownloadTxt">DOWNLOAD TXT</button>
+          <button class="btn" id="mkExportJson">EXPORT JSON</button>
+          <button class="btn danger" id="mkDeleteUnused">DELETE UNUSED</button>
+        </div>
+        <p class="hint" id="mkKeyCount">0 keys in this script</p>
+      </div>
+      <div class="block">
+        <p class="section-title">Import Keys</p>
+        <p class="hint">Migrating from another whitelist service? Import a .txt (one key per line) or .json file.</p>
+        <div class="row-inline">
+          <label class="btn file-btn">UPLOAD FILE
+            <input type="file" id="mkImportFile" accept=".txt,.json" class="sr-input" />
+          </label>
+          <button class="btn primary" id="mkImportConfirm">CONFIRM</button>
+        </div>
+        <p class="hint" id="mkImportName">No file selected.</p>
+      </div>    </div>
   </section>
 </div>
 
