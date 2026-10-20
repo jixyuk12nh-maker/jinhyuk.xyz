@@ -151,8 +151,14 @@ export default {
       if (path === '/api/auth/signup' && method === 'POST') return signup(request, env, await readBody(request));
       if (path === '/api/key-run' && method === 'POST') return keyRun(request, env, await readBody(request));
       if (path.startsWith('/api/')) return withCors(await handleApi(request, env, url));
-      if (path === '/admin' || path === '/admin/') {
-        // html_handling 이 "none" 이라 /admin 은 admin.html 파일로 직접 요청해야 한다
+      // html_handling: "none" 이므로 /, /login, /admin 을 HTML 파일에 명시적으로 연결한다.
+      if (method === 'GET' && (path === '/' || path === '/index.html')) {
+        return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/index.html', url), request)) : plain('Not found', 404);
+      }
+      if (method === 'GET' && (path === '/login' || path === '/login/')) {
+        return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/login.html', url), request)) : plain('Not found', 404);
+      }
+      if (method === 'GET' && (path === '/admin' || path === '/admin/')) {
         return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/admin.html', url), request)) : plain('Not found', 404);
       }
       if (method === 'GET' && env.ASSETS) {
