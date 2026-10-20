@@ -58,6 +58,32 @@ npm run obfuscate -- 스크립트폴더 -o 출력폴더    # 폴더 안의 .lua 
 ```
 출력에는 `VM 구간 N개, 원문 구간 M개`가 나옵니다. 원문 구간이 많으면 난독화되지 않은 부분이 많다는 뜻입니다.
 
+## 보안 보호 (Turnstile / 자동 차단)
+
+### Turnstile 설정
+
+1. Cloudflare Dashboard → Turnstile에서 `jinhyuk.xyz` 도메인용 위젯을 생성합니다.
+2. 사이트 키를 Worker 변수 `TURNSTILE_SITE_KEY`로 설정합니다.
+3. 비밀 키는 공개 변수나 코드에 넣지 말고 Worker Secret으로 설정합니다.
+   ```sh
+   npx wrangler secret put TURNSTILE_SECRET_KEY
+   ```
+4. `TURNSTILE_HOSTNAME`은 `jinhyuk.xyz`로 설정합니다. 로컬 또는 다른 도메인에서 시험하려면 해당 호스트도 Turnstile에 등록하고 호스트 값을 맞춰야 합니다.
+5. 두 키가 모두 설정되면 첫 브라우저 진입에 Turnstile을 표시하고, 성공 후 30분 동안 유효한 서명된 HttpOnly 쿠키를 발급합니다. 브라우저 API 요청도 해당 쿠키를 확인합니다.
+
+키를 설정하지 않으면 Turnstile 검사는 활성화되지 않습니다. 배포 후 `GET /api/health` 응답의 `turnstile` 값이 `true`인지 확인하세요.
+
+### 공격 시도 대응
+
+- 같은 IP에서 같은 스크립트의 잘못된 키를 10분 안에 6회 이상 시도하면 이후 응답에 실제 코드 대신 실행 효과가 없는 페이크 Lua 응답을 반환합니다.
+- 10분 안에 8회 이상 반복하면 해당 IP를 72시간 자동 차단합니다.
+- 인증 없는 API 요청도 반복되면 72시간 자동 차단될 수 있습니다.
+- 자동 차단 만료 시각은 D1 `banned_ips.expires_at`에 저장됩니다. 기존 수동 차단은 만료 시각이 없으면 영구 차단으로 유지됩니다.
+- 보안 이벤트는 D1 `security_events`에 기록되고, owner/admin은 `GET /api/security-events`로 최근 이벤트를 조회할 수 있습니다.
+- 클라이언트 내부의 메모리 덤프 도구 사용을 서버가 직접 확실히 감지할 수는 없습니다. 이 구현은 반복적인 잘못된 키와 인증 실패 등 서버에서 관찰 가능한 신호에 대응합니다.
+
+Cloudflare Dashboard의 **Security → Bots → Bot Fight Mode**도 별도로 활성화하세요. 이 설정은 Worker 코드로 자동 활성화되지 않습니다.
+
 ## 테스트
 ```
 npm test
@@ -109,7 +135,7 @@ npm test
 ## 한계
 - 키리스 원문과 키 모드 로더는 누구나 받을 수 있습니다. 키 모드의 실제 코드는 유효한 키에만 내주지만, 키를 받은 사람은 그 코드를 복사할 수 있습니다.
 - 브라우저 여부는 요청 헤더로 판단합니다. 헤더를 직접 조작하면 구분할 수 없습니다.
-- API 요청 횟수 제한은 아직 없습니다.
+- 요청 방어는 Turnstile 및 반복 인증 실패 기반 자동 차단을 포함합니다. 모든 경로에 대한 정교한 분산 rate limit은 Cloudflare 대시보드의 WAF/Rate Limiting 규칙도 함께 설정해야 합니다.
 - 난독화된 최상위 `local` 변수는 전역 변수로 남습니다. 원본과 실행 결과는 같지만 `_G`에서는 보입니다. 원문 구간의 `local`은 그대로 유지됩니다.
 - 원문은 작성자와 소유자만 볼 수 있습니다. 관리자라도 작성자가 아니면 볼 수 없습니다.
 - 주요 작업과 인증 실패는 `api_audit_logs`에 기록됩니다.
