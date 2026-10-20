@@ -10,6 +10,7 @@
   const OBF_LIMIT = 3000;
   const KEY_LIMIT = 10000;
   const TOKEN_KEY = 'luarmor-api-key';
+  const BUSY_MSG = '저장 중입니다. 잠시만 기다려 주세요.';
   const TOKEN_RE = /^tmk_[A-Za-z0-9_-]{20,}$/;
   const GEAR = '<svg viewBox="0 0 24 24" aria-hidden="true" width="18" height="18" fill="currentColor"><path d="m19.42 13.1 1.11.86-1.93 3.34-1.3-.52c-.47.35-.99.65-1.55.87l-.19 1.38h-3.85l-.19-1.38c-.56-.22-1.08-.52-1.55-.87l-1.3.52-1.93-3.34 1.11-.86a6.96 6.96 0 0 1 0-1.8l-1.11-.86L8.67 7.1l1.3.52c.47-.35.99-.65 1.55-.87l.19-1.38h3.85l.19 1.38c.56.22 1.08.52 1.55.87l1.3-.52 1.93 3.34-1.11.86c.08.59.08 1.21 0 1.8ZM13.64 14.3a2.95 2.95 0 1 0 0-5.9 2.95 2.95 0 0 0 0 5.9Z"/></svg>';
 
@@ -54,7 +55,11 @@
     if (db.apiKey) headers.set('authorization', `Bearer ${db.apiKey}`);
     const response = await fetch(path, { ...options, headers });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+    if (!response.ok) {
+      const error = new Error(data.error || `Request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
     return data;
   }
 
@@ -116,7 +121,13 @@
         await loadKeys();
       }
     } catch (error) {
-      toast(error.message);
+      if (error.status === 401) {
+        clearData();
+        openAccount();
+        banner('accountBanner', '저장된 API 키가 만료되었거나 차단되었습니다. 새 키를 입력하고 저장하세요.', 'error');
+      } else {
+        toast(error.message);
+      }
     }
     renderAll();
   }
@@ -208,7 +219,8 @@
   }
 
   function closeDialog() {
-    if (!openDialogId || busy) return;
+    if (!openDialogId) return;
+    if (busy) return toast(BUSY_MSG);
     const el = $(dialogIds[openDialogId]);
     el.classList.remove('open');
     el.setAttribute('aria-hidden', 'true');
@@ -478,7 +490,7 @@
   }
 
   async function saveProject(button) {
-    if (busy) return;
+    if (busy) return toast(BUSY_MSG);
     const name = $('pName').value.trim();
     if (!name) {
       banner('projectBanner', 'Project name is required.', 'error');
@@ -566,7 +578,8 @@
 
   async function saveScript(button) {
     const p = selected();
-    if (!p || busy) return;
+    if (!p) return;
+    if (busy) return toast(BUSY_MSG);
     const name = $('scriptName').value.trim() || 'Untitled script';
     const code = $('scriptCode').value;
     if (!code.trim()) {
@@ -593,14 +606,19 @@
       } else {
         const data = await api('/api/scripts', { method: 'POST', body: JSON.stringify({ ...body, project_id: p.id }) });
         scriptId = data.script.id;
+        // 생성에 성공했으면 이후 재시도는 새로 만들지 않고 이 스크립트를 수정합니다.
+        editScriptId = scriptId;
       }
       const keptIds = new Set(pending.filter((f) => f.id).map((f) => f.id));
-      const existing = editScriptId ? (await api(`/api/scripts/${scriptId}/files`)).files || [] : [];
+      const existing = (await api(`/api/scripts/${scriptId}/files`)).files || [];
       for (const file of existing) {
         if (!keptIds.has(file.id)) await api(`/api/script-files/${file.id}`, { method: 'DELETE' });
       }
       for (const item of pending.filter((f) => f.file)) {
-        await api(`/api/scripts/${scriptId}/files`, { method: 'POST', body: JSON.stringify({ name: item.name, content: await item.file.text() }) });
+        const result = await api(`/api/scripts/${scriptId}/files`, { method: 'POST', body: JSON.stringify({ name: item.name, content: await item.file.text() }) });
+        // 업로드된 파일은 표시를 바꿔서, 재시도할 때 같은 파일을 두 번 올리지 않게 합니다.
+        item.id = result.file.id;
+        item.file = null;
       }
       editScriptId = null;
       pending = [];
@@ -688,7 +706,7 @@
   }
 
   async function saveKey(button) {
-    if (busy) return;
+    if (busy) return toast(BUSY_MSG);
     const username = $('uUser').value.trim();
     const role = $('uRole').value;
     const label = $('uLabel').value.trim();
@@ -936,7 +954,7 @@
   }
 
   async function saveScriptKey(button) {
-    if (busy) return;
+    if (busy) return toast(BUSY_MSG);
     const scriptId = $('skScript').value;
     const raw = $('skDays').value.trim();
     const days = raw === '' ? undefined : Number(raw);
