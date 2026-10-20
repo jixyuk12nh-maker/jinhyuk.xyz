@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { obfuscate, obfuscateDetailed } from '../src/obfuscator.js';
 
-// Lua 5.3 계열에는 bit32가 없으므로 테스트 실행용 shim을 앞에 붙인다. Roblox(Luau)는 기본 제공한다.
 const BIT32_SHIM = 'bit32 = {bxor=function(a,b) local r,p=0,1 while a>0 or b>0 do local x,y=a%2,b%2 if x~=y then r=r+p end a=a//2 b=b//2 p=p*2 end return r end}\n';
 
 function findLua() {
@@ -22,7 +21,6 @@ function runLua(file) {
   return execFileSync(LUA, [file], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-// 원본과 난독화본을 실제로 실행해서 출력이 같은지 확인한다.
 function assertSameOutput(src) {
   const dir = mkdtempSync(join(tmpdir(), 'obf-'));
   const orig = join(dir, 'orig.lua');
