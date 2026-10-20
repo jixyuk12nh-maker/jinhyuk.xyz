@@ -139,3 +139,8 @@ npm test
 - 난독화된 최상위 `local` 변수는 전역 변수로 남습니다. 원본과 실행 결과는 같지만 `_G`에서는 보입니다. 원문 구간의 `local`은 그대로 유지됩니다.
 - 원문은 작성자와 소유자만 볼 수 있습니다. 관리자라도 작성자가 아니면 볼 수 없습니다.
 - 주요 작업과 인증 실패는 `api_audit_logs`에 기록됩니다.
+## Chunked script delivery
+
+Key-protected scripts now use a six-chunk delivery flow. The Worker creates a 120-second session, stores only a hash of the session token, serves one chunk per ordered request, rechecks the license/key before each chunk, and rejects replay/out-of-order requests. The legacy `/api/key-run` endpoint is disabled so it cannot return the full script in one response. Apply migrations `0017_script_delivery_sessions.sql` and `0018_served_script_integrity.sql` before deploying this version.
+
+This raises extraction difficulty but is not DRM: a client that receives and executes Lua code can still dump or reconstruct it. Use server-side logic for sensitive decisions and rotate/revoke exposed keys.
