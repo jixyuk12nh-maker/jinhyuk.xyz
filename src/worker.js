@@ -15,7 +15,7 @@ const USER_LIMIT = 10000;
 const MAX_FILES = 10;
 const BATCH_LIMIT = 300;
 const PROJECT_NAME_MAX = 60;
-const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, obfuscated, status, version, project_id, byte_size, sha256, created_at, updated_at, created_by';
+const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, obfuscated, status, version, project_id, byte_size, sha256, served_sha256, created_at, updated_at, created_by';
 
 const CORS_HEADERS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type' };
 const withCors = (response) => {
@@ -71,17 +71,27 @@ const contentDisposition = (slug) => {
 const keyStub = (slug, origin) => `local request_fn = (syn and syn.request) or (http and http.request) or http_request or request
 assert(request_fn, "이 실행기는 request 함수를 지원하지 않습니다")
 assert(type(script_key) == "string" and script_key ~= "", "script_key를 먼저 설정하세요")
+local HttpService = game:GetService("HttpService")
 local hwid = "unknown"
 pcall(function() hwid = game:GetService("RbxAnalyticsService"):GetClientId() end)
-local response = request_fn({
-	Url = "${origin}/api/key-run",
-	Method = "POST",
-	Headers = { ["Content-Type"] = "application/json" },
-	Body = game:GetService("HttpService"):JSONEncode({ slug = "${slug}", key = script_key, hwid = hwid })
-})
-assert(response and response.StatusCode == 200, "스크립트 키 검증에 실패했습니다")
-local data = game:GetService("HttpService"):JSONDecode(response.Body)
-loadstring(data.code)()
+local function post(path, body)
+	return request_fn({ Url = "${origin}" .. path, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(body) })
+end
+local started = post("/api/key-session", { slug = "${slug}", key = script_key, hwid = hwid })
+assert(started and started.StatusCode == 200, "스크립트 키 검증에 실패했습니다")
+local session = HttpService:JSONDecode(started.Body)
+assert(session and session.ok and type(session.token) == "string", "보안 세션을 만들 수 없습니다")
+local chunks = {}
+for index = 0, 5 do
+	local response = post("/api/key-chunk", { token = session.token, index = index })
+	assert(response and response.StatusCode == 200, "스크립트 조각 검증에 실패했습니다")
+	local part = HttpService:JSONDecode(response.Body)
+	assert(part and part.ok and part.index == index and part.total == 6 and type(part.chunk) == "string", "스크립트 조각이 유효하지 않습니다")
+	chunks[index + 1] = part.chunk
+end
+local code = table.concat(chunks)
+assert(#code > 0, "스크립트 데이터가 비어 있습니다")
+loadstring(code)()
 `;
 const safeUsername = (value) => {
   const v = String(value ?? '').trim();
@@ -267,7 +277,7 @@ export default {
       if (path === '/api/health' && method === 'GET') return health(env);
       if (path === '/api/security/turnstile-config' && method === 'GET') return json({ enabled: turnstileEnabled(env), site_key: turnstileEnabled(env) ? env.TURNSTILE_SITE_KEY : null });
       if (path === '/api/security/turnstile-verify' && method === 'POST') return withCors(await verifyTurnstile(request, env, await readBody(request)));
-      if (turnstileEnabled(env) && isBrowserInitiated(request, url) && path !== '/api/security/turnstile-config' && path !== '/api/security/turnstile-verify' && path !== '/api/health' && path !== '/api/key-run') {
+      if (turnstileEnabled(env) && isBrowserInitiated(request, url) && path !== '/api/security/turnstile-config' && path !== '/api/security/turnstile-verify' && path !== '/api/health' && !['/api/key-run', '/api/key-session', '/api/key-chunk'].includes(path)) {
         const clear = await hasTurnstileClearance(request, env);
         if (!clear) {
           if (path.startsWith('/api/')) return withCors(fail(403, 'Complete browser verification first.'));
@@ -278,7 +288,12 @@ export default {
         if (turnstileEnabled(env) && !(await hasTurnstileClearance(request, env))) return withCors(fail(403, 'Complete browser verification first.'));
         return withCors(await signup(request, env, await readBody(request)));
       }
-      if (path === '/api/key-run' && method === 'POST') return keyRun(request, env, await readBody(request));
+      if (path === '/api/key-session' && method === 'POST') return withCors(await startKeyDelivery(request, env, await readBody(request)));
+      if (path === '/api/key-chunk' && method === 'POST') return withCors(await deliverKeyChunk(request, env, await readBody(request)));
+      if (path === '/api/key-run' && method === 'POST') {
+        await recordSecurityEvent(env, request, 'script.delivery.legacy_blocked', 'denied');
+        return withCors(fail(410, 'Legacy script delivery is disabled. Fetch a new loader.'));
+      }
       if (path.startsWith('/api/')) return withCors(await handleApi(request, env, url));
       // html_handling: "none" 이므로 /, /login, /admin 을 HTML 파일에 명시적으로 연결한다.
       if (method === 'GET' && (path === '/' || path === '/index.html')) {
@@ -834,25 +849,41 @@ async function serveRaw(request, env, kind, value) {
   return new Response(object.body, { headers: { ...TEXT_HEADERS, 'content-disposition': contentDisposition(row.slug), 'x-script-sha256': row.sha256 } });
 }
 
-async function keyRun(request, env, body) {
-  if (isBrowserRequest(request)) return plain('403 Forbidden', 403);
-  return keyRunCore(request, env, body);
+const DELIVERY_CHUNK_COUNT = 6;
+const DELIVERY_SESSION_SECONDS = 120;
+
+function splitScriptIntoChunks(code) {
+  const points = Array.from(code);
+  const chunks = [];
+  for (let i = 0; i < DELIVERY_CHUNK_COUNT; i++) {
+    const start = Math.floor(points.length * i / DELIVERY_CHUNK_COUNT);
+    const end = Math.floor(points.length * (i + 1) / DELIVERY_CHUNK_COUNT);
+    chunks.push(points.slice(start, end).join(''));
+  }
+  return chunks;
 }
 
-async function keyRunCore(request, env, body) {
-  if (!body || typeof body.slug !== 'string' || typeof body.key !== 'string') return fail(400, 'slug and key are required.');
-  const script = await env.DB.prepare('SELECT * FROM hosted_scripts WHERE slug = ?').bind(normalizeSlug(body.slug)).first();
-  if (!script || script.mode !== 'key') return fail(404, 'Script not found.');
-  const hwid = typeof body.hwid === 'string' ? body.hwid.trim() : '';
-  if (script.hwid_lock && (!hwid || hwid.length > 128)) return fail(400, 'hwid is required for this script.');
-
-  const license = script.project_id
-    ? await env.DB.prepare('SELECT id, hwid FROM license_users WHERE license_key = ? AND project_id = ?').bind(body.key.trim(), script.project_id).first()
-    : null;
+async function startKeyDelivery(request, env, body) {
+  if (!body || typeof body.slug !== 'string' || typeof body.key !== 'string' || body.key.length > 256) return fail(400, 'slug and key are required.');
+  const slug = normalizeSlug(body.slug);
+  const key = body.key.trim();
+  const script = await env.DB.prepare('SELECT * FROM hosted_scripts WHERE slug = ?').bind(slug).first();
+  if (!script || script.mode !== 'key' || script.status === 'DRAFT') return fail(404, 'Script not found.');
+  const hwid = typeof body.hwid === 'string' ? body.hwid.trim().slice(0, 128) : '';
+  if (script.hwid_lock && !hwid) return fail(400, 'hwid is required for this script.');
+  const keyHash = await sha256Hex(key);
+  let keyType = '';
+  let keyId = '';
+  let license = null;
+  if (script.project_id) {
+    license = await env.DB.prepare('SELECT id, hwid FROM license_users WHERE license_key = ? AND project_id = ?').bind(key, script.project_id).first();
+  }
   if (license) {
+    keyType = 'license';
+    keyId = license.id;
     if (script.hwid_lock) {
       if (license.hwid && license.hwid !== hwid) {
-        await audit(env, request, null, 'script.key_run', script.id, 'hwid_mismatch');
+        await audit(env, request, null, 'script.key_session', script.id, 'hwid_mismatch');
         return fail(403, 'This key is bound to another device.');
       }
       if (!license.hwid) {
@@ -862,41 +893,124 @@ async function keyRunCore(request, env, body) {
       }
     }
     await env.DB.prepare('UPDATE license_users SET used = 1 WHERE id = ?').bind(license.id).run();
-    const object = await env.BUCKET.get(script.object_key);
-    if (!object) return fail(404, 'Script content missing.');
-    await audit(env, request, null, 'script.key_run', script.id, 'ok');
-    return json({ ok: true, code: await object.text() });
+  } else {
+    const row = await env.DB.prepare(
+      `SELECT sk.id, sk.user_id, sk.status, sk.expires_at, sk.hwid, u.status AS user_status
+       FROM script_keys sk JOIN api_users u ON u.id = sk.user_id
+       WHERE sk.key_hash = ? AND sk.script_id = ?`
+    ).bind(keyHash, script.id).first();
+    const valid = row && row.status === 'active' && row.user_status === 'active' && !isExpired(row.expires_at);
+    if (!valid) {
+      const result = await recordInvalidScriptKey(env, request, script.id);
+      if (result.banned) return fail(403, 'Access temporarily blocked for 72 hours.');
+      if (result.decoy) {
+        keyType = 'decoy';
+        keyId = '';
+      } else {
+        return fail(403, 'Invalid or inactive script key.');
+      }
+    } else {
+      keyType = 'script';
+      keyId = row.id;
+      if (script.hwid_lock) {
+        if (row.hwid && row.hwid !== hwid) {
+          await audit(env, request, { user: { id: row.user_id }, keyId: row.id }, 'script.key_session', script.id, 'hwid_mismatch');
+          return fail(403, 'This key is bound to another device.');
+        }
+        if (!row.hwid) {
+          await env.DB.prepare('UPDATE script_keys SET hwid = ? WHERE id = ? AND hwid IS NULL').bind(hwid, row.id).run();
+          const bound = await env.DB.prepare('SELECT hwid FROM script_keys WHERE id = ?').bind(row.id).first();
+          if (bound?.hwid !== hwid) return fail(403, 'This key is bound to another device.');
+        }
+      }
+      await env.DB.prepare(`UPDATE script_keys SET last_used_at = ${NOW_SQL} WHERE id = ?`).bind(row.id).run();
+    }
   }
+  const token = newSecret('tds_', 48);
+  const expiresAt = new Date(Date.now() + DELIVERY_SESSION_SECONDS * 1000).toISOString();
+  const sessionId = randomHex(16);
+  await env.DB.prepare(
+    `INSERT INTO script_delivery_sessions (id, token_hash, script_id, key_type, key_id, key_hash, hwid, initial_ip, next_chunk, expires_at, decoy)
+     VALUES (?,?,?,?,?,?,?,?,0,?,?)`
+  ).bind(sessionId, await sha256Hex(token), script.id, keyType, keyId || null, keyHash, hwid || null, request.headers.get('cf-connecting-ip') || null, expiresAt, keyType === 'decoy' ? 1 : 0).run();
+  await env.DB.prepare(`DELETE FROM script_delivery_sessions WHERE expires_at <= ? OR (revoked_at IS NOT NULL AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 day'))`).bind(new Date().toISOString()).run();
+  await recordSecurityEvent(env, request, 'script.delivery.session_created', 'ok', script.id);
+  return json({ ok: true, token, chunks: DELIVERY_CHUNK_COUNT, expires_at: expiresAt });
+}
 
-  // 차단된 계정이 발급받은 스크립트 키도 함께 막는다
-  const row = await env.DB.prepare(
-    `SELECT sk.id, sk.user_id, sk.status, sk.expires_at, sk.hwid, u.status AS user_status
-     FROM script_keys sk JOIN api_users u ON u.id = sk.user_id
-     WHERE sk.key_hash = ? AND sk.script_id = ?`
-  ).bind(await sha256Hex(body.key.trim()), script.id).first();
-  const valid = row && row.status === 'active' && row.user_status === 'active' && !isExpired(row.expires_at);
-  if (!valid) {
-    const response = await recordInvalidScriptKey(env, request, script.id);
-    if (response.banned) return fail(403, 'Access temporarily blocked for 72 hours.');
-    if (response.decoy) return json({ ok: true, code: DECOY_CODE });
-    return fail(403, 'Invalid or inactive script key.');
+async function validateDeliverySession(env, session) {
+  if (session.decoy) return true;
+  const script = await env.DB.prepare('SELECT project_id, hwid_lock, status FROM hosted_scripts WHERE id = ?').bind(session.script_id).first();
+  if (!script || script.status === 'DRAFT') return false;
+  if (session.key_type === 'license') {
+    const row = await env.DB.prepare('SELECT license_key, hwid, project_id FROM license_users WHERE id = ?').bind(session.key_id).first();
+    if (!row || row.project_id !== script.project_id || await sha256Hex(row.license_key) !== session.key_hash) return false;
+    if (script.hwid_lock && (!session.hwid || row.hwid !== session.hwid)) return false;
+    return true;
   }
-  if (script.hwid_lock) {
-    if (row.hwid && row.hwid !== hwid) {
-      await audit(env, request, { user: { id: row.user_id }, keyId: row.id }, 'script.key_run', script.id, 'hwid_mismatch');
-      return fail(403, 'This key is bound to another device.');
+  if (session.key_type === 'script') {
+    const row = await env.DB.prepare(
+      `SELECT sk.key_hash, sk.status, sk.expires_at, sk.hwid, u.status AS user_status
+       FROM script_keys sk JOIN api_users u ON u.id = sk.user_id
+       WHERE sk.id = ? AND sk.script_id = ?`
+    ).bind(session.key_id, session.script_id).first();
+    if (!row || row.key_hash !== session.key_hash || row.status !== 'active' || row.user_status !== 'active' || isExpired(row.expires_at)) return false;
+    if (script.hwid_lock && (!session.hwid || row.hwid !== session.hwid)) return false;
+    return true;
+  }
+  return false;
+}
+
+async function deliverKeyChunk(request, env, body) {
+  if (!body || typeof body.token !== 'string' || body.token.length > 256 || !Number.isInteger(body.index)) return fail(400, 'token and chunk index are required.');
+  const tokenHash = await sha256Hex(body.token);
+  const session = await env.DB.prepare('SELECT * FROM script_delivery_sessions WHERE token_hash = ?').bind(tokenHash).first();
+  if (!session) return fail(403, 'Delivery session is invalid.');
+  const now = new Date().toISOString();
+  if (session.revoked_at || Date.parse(session.expires_at) <= Date.now()) {
+    await recordSecurityEvent(env, request, 'script.delivery.expired_or_revoked', 'denied', session.script_id);
+    return fail(403, 'Delivery session expired. Request a new loader.');
+  }
+  if (body.index < 0 || body.index >= DELIVERY_CHUNK_COUNT || body.index !== session.next_chunk) {
+    await env.DB.prepare('UPDATE script_delivery_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').bind(now, session.id).run();
+    await recordSecurityEvent(env, request, 'script.delivery.replay_or_order_violation', 'blocked', session.script_id);
+    return fail(409, 'Chunk order is invalid. Request a new loader.');
+  }
+  if (!(await validateDeliverySession(env, session))) {
+    await env.DB.prepare('UPDATE script_delivery_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').bind(now, session.id).run();
+    await recordSecurityEvent(env, request, 'script.delivery.key_revoked', 'blocked', session.script_id);
+    return fail(403, 'License is no longer active.');
+  }
+  let code = DECOY_CODE;
+  if (!session.decoy) {
+    const script = await env.DB.prepare('SELECT object_key, served_sha256 FROM hosted_scripts WHERE id = ?').bind(session.script_id).first();
+    const object = script?.object_key ? await env.BUCKET.get(script.object_key) : null;
+    if (!object) return fail(404, 'Script content missing.');
+    code = await object.text();
+    const actualDigest = await sha256Hex(code);
+    if (script.served_sha256 && actualDigest !== script.served_sha256) {
+      await env.DB.prepare('UPDATE script_delivery_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').bind(now, session.id).run();
+      await recordSecurityEvent(env, request, 'script.delivery.integrity_failure', 'blocked', session.script_id);
+      return fail(500, 'Protected script integrity check failed.');
     }
-    if (!row.hwid) {
-      await env.DB.prepare('UPDATE script_keys SET hwid = ? WHERE id = ? AND hwid IS NULL').bind(hwid, row.id).run();
-      const bound = await env.DB.prepare('SELECT hwid FROM script_keys WHERE id = ?').bind(row.id).first();
-      if (bound?.hwid !== hwid) return fail(403, 'This key is bound to another device.');
+    if (!script.served_sha256) {
+      await env.DB.prepare('UPDATE hosted_scripts SET served_sha256 = ? WHERE id = ? AND served_sha256 IS NULL').bind(actualDigest, session.script_id).run();
     }
   }
-  await env.DB.prepare(`UPDATE script_keys SET last_used_at = ${NOW_SQL} WHERE id = ?`).bind(row.id).run();
-  const object = await env.BUCKET.get(script.object_key);
-  if (!object) return fail(404, 'Script content missing.');
-  await audit(env, request, { user: { id: row.user_id }, keyId: row.id }, 'script.key_run', script.id, 'ok');
-  return json({ ok: true, code: await object.text() });
+  const chunks = splitScriptIntoChunks(code);
+  const chunk = chunks[body.index];
+  const updated = await env.DB.prepare(
+    `UPDATE script_delivery_sessions
+     SET next_chunk = next_chunk + 1, revoked_at = CASE WHEN next_chunk = ? THEN ? ELSE revoked_at END
+     WHERE id = ? AND next_chunk = ? AND revoked_at IS NULL AND expires_at > ?`
+  ).bind(DELIVERY_CHUNK_COUNT - 1, now, session.id, body.index, now).run();
+  if (!updated.meta || updated.meta.changes !== 1) {
+    await env.DB.prepare('UPDATE script_delivery_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').bind(now, session.id).run();
+    await recordSecurityEvent(env, request, 'script.delivery.replay_or_race', 'blocked', session.script_id);
+    return fail(409, 'Chunk was already consumed. Request a new loader.');
+  }
+  await recordSecurityEvent(env, request, 'script.delivery.chunk_sent', 'ok', `${session.script_id}:${body.index}`);
+  return json({ ok: true, index: body.index, total: DELIVERY_CHUNK_COUNT, chunk, sha256: await sha256Hex(chunk) });
 }
 
 async function execute(request, env, auth, body) {
@@ -962,10 +1076,10 @@ async function putRaw(env, { scriptId, rawKey, rawCode, objectKey, digest }) {
   });
 }
 
-async function putObfuscated(env, { scriptId, rawKey, objectKey, served, digest }) {
+async function putObfuscated(env, { scriptId, rawKey, objectKey, served, digest, servedDigest }) {
   await env.BUCKET.put(objectKey, served, {
     ...OBJECT_META,
-    customMetadata: { scriptId, sha256: digest, role: 'obfuscated', obfuscated: '1', pair: rawKey },
+    customMetadata: { scriptId, sha256: digest, servedSha256: servedDigest, role: 'obfuscated', obfuscated: '1', pair: rawKey },
   });
 }
 
@@ -1003,9 +1117,11 @@ async function createScript(request, env, auth, body) {
   await putRaw(env, { scriptId: id, rawKey, rawCode: body.code, objectKey, digest });
 
   let served;
+  let servedDigest;
   try {
     served = await obfuscateLua(env, body.code);
     if (byteLength(served) > maxBytes(env)) throw new HttpError(413, `Obfuscated script exceeds ${maxBytes(env)} bytes.`);
+    servedDigest = await sha256Hex(served);
     await audit(env, request, auth, 'script.obfuscate', id, 'ok');
   } catch (error) {
     await audit(env, request, auth, 'script.obfuscate', id, 'failed');
@@ -1015,7 +1131,7 @@ async function createScript(request, env, auth, body) {
   }
 
   try {
-    await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, digest });
+    await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, digest, servedDigest });
   } catch (error) {
     await purgeObjects(env, [rawKey, objectKey]);
     throw error;
@@ -1023,9 +1139,9 @@ async function createScript(request, env, auth, body) {
 
   try {
     await env.DB.prepare(
-      `INSERT INTO hosted_scripts (id, slug, name, object_key, raw_object_key, obfuscated, byte_size, sha256, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, project_id, status, version, created_by)
-       VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,'ACTIVE','v0.0.0.1',?)`
-    ).bind(id, slug, name, objectKey, rawKey, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, projectId, auth.user.id).run();
+      `INSERT INTO hosted_scripts (id, slug, name, object_key, raw_object_key, obfuscated, byte_size, sha256, served_sha256, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, project_id, status, version, created_by)
+       VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','v0.0.0.1',?)`
+    ).bind(id, slug, name, objectKey, rawKey, size, digest, servedDigest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, projectId, auth.user.id).run();
   } catch (error) {
     await purgeObjects(env, [objectKey, rawKey]);
     throw error;
@@ -1051,6 +1167,7 @@ async function updateScript(request, env, auth, id, body) {
   const opts = scriptOptions(body, current);
   let size = current.byte_size;
   let digest = current.sha256;
+  let servedDigest = current.served_sha256 || null;
   const newCode = typeof body.code === 'string' ? body.code : null;
   if (newCode !== null) {
     size = byteLength(newCode);
@@ -1077,6 +1194,7 @@ async function updateScript(request, env, auth, id, body) {
     try {
       served = await obfuscateLua(env, newCode);
       if (byteLength(served) > maxBytes(env)) throw new HttpError(413, `Obfuscated script exceeds ${maxBytes(env)} bytes.`);
+      servedDigest = await sha256Hex(served);
       await audit(env, request, auth, 'script.obfuscate', id, 'ok');
     } catch (error) {
       await audit(env, request, auth, 'script.obfuscate', id, 'failed');
@@ -1086,7 +1204,7 @@ async function updateScript(request, env, auth, id, body) {
     }
 
     try {
-      await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, digest });
+      await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, digest, servedDigest });
     } catch (error) {
       await purgeObjects(env, [rawKey, objectKey]);
       throw error;
@@ -1096,8 +1214,8 @@ async function updateScript(request, env, auth, id, body) {
   const status = changed || current.status !== 'ACTIVE' ? 'ACTIVE' : current.status;
   try {
     await env.DB.prepare(
-      `UPDATE hosted_scripts SET object_key = ?, raw_object_key = ?, obfuscated = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
-    ).bind(objectKey, rawKey, obfuscated, slug, name, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
+      `UPDATE hosted_scripts SET object_key = ?, raw_object_key = ?, obfuscated = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, served_sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
+    ).bind(objectKey, rawKey, obfuscated, slug, name, size, digest, servedDigest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
   } catch (error) {
     if (objectKey !== oldObjectKey) await purgeObjects(env, [objectKey, rawKey]);
     throw error;
