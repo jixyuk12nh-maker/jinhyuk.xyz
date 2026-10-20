@@ -141,7 +141,7 @@ export default {
       if (path === '/api/key-run' && method === 'POST') return keyRun(request, env, await readBody(request));
       if (path.startsWith('/api/')) return await handleApi(request, env, url);
       if (path === '/admin' || path === '/admin/') {
-        return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/admin.html', url), request)) : plain('Not found', 404);
+        return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/admin', url), request)) : plain('Not found', 404);
       }
       const rawId = path.match(/^\/raw\/([A-Za-z0-9_-]{8,40})$/);
       if (rawId && method === 'GET') return await serveRaw(request, env, 'id', rawId[1]);
