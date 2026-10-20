@@ -28,6 +28,7 @@
   let toastTimer = 0;
   let dragDepth = 0;
   let busy = false;
+  let dialogSeq = 0;
 
   const dialogIds = {
     source: 'sourceModal',
@@ -273,6 +274,7 @@
     el.classList.remove('open');
     el.setAttribute('aria-hidden', 'true');
     openDialogId = null;
+    dialogSeq++;
     document.body.style.overflow = '';
     if (dialogFocus && dialogFocus.isConnected) dialogFocus.focus();
     dialogFocus = null;
@@ -309,6 +311,16 @@
     box.addEventListener('animationend', () => box.classList.remove('flash'), { once: true });
   }
 
+  function animateIn(el, sig, cls = 'enter', ms = 1100) {
+    if (el.dataset.sig === sig) return;
+    el.dataset.sig = sig;
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
+    clearTimeout(el.animTimer);
+    el.animTimer = setTimeout(() => el.classList.remove(cls), ms);
+  }
+
   function renderChrome() {
     const isUser = db.role === 'user';
     $('drawer').querySelectorAll('.nav-item[data-nav="users"]').forEach((b) => { b.hidden = isUser; });
@@ -338,6 +350,7 @@
     const wrap = $('tabs');
     wrap.textContent = '';
     wrap.hidden = !db.projects.length;
+    animateIn(wrap, 'tabs:' + db.projects.map((p) => p.id).join(','));
     db.projects.forEach((p) => {
       const b = document.createElement('button');
       b.type = 'button';
@@ -381,6 +394,8 @@
     const tbody = $('rows');
     tbody.textContent = '';
     const list = projectScripts(p.id);
+    animateIn(tbody, 'rows:' + p.id + ':' + list.map((s) => s.id).join(','));
+    animateIn($('projectPanel'), 'panel:' + p.id, 'swap', 700);
     if (!list.length) {
       tbody.innerHTML = '<tr class="empty-row"><td colspan="4"><div class="empty">No scripts yet. Use ADD SCRIPT to create one.</div></td></tr>';
       return;
@@ -467,6 +482,7 @@
       row.append(info, actions);
       list.appendChild(row);
     });
+    animateIn(list, 'users:' + rows.map((a) => a.id).join(','));
   }
 
   async function setUserStatus(id, status) {
@@ -528,6 +544,7 @@
       row.append(text, actions);
       list.appendChild(row);
     });
+    animateIn(list, 'profile:' + mine.map((s) => s.id).join(','));
   }
 
   async function openSource(id) {
@@ -584,6 +601,7 @@
   function renderKeys() {
     const list = $('keyList');
     list.textContent = '';
+    animateIn(list, 'keys:' + dialogSeq + ':' + ctxId);
     const p = project(ctxId);
     const keys = ctxId === ORPHAN_ID ? db.keys.filter((k) => !k.project_id) : p ? projectKeys(p.id) : [];
     const q = $('keySearch').value.trim().toLowerCase();
@@ -849,6 +867,7 @@
       li.append(name, size, rm);
       ul.appendChild(li);
     });
+    animateIn(ul, 'files:' + pending.map((f) => f.name).join('|'));
   }
 
   const ICON_USER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Zm0 2c-4.2 0-7.5 2.1-7.5 4.7V21h15v-2.3c0-2.6-3.3-4.7-7.5-4.7Z"/></svg>';
@@ -1111,6 +1130,7 @@
       row.append(info, actions);
       list.appendChild(row);
     });
+    animateIn(list, 'sk:' + loaders.map(({ s }) => s.id).join(','));
   }
 
   function openIssueKey(projectId, scriptId) {
@@ -1438,6 +1458,7 @@
   function renderScriptKeys() {
     const list = $('scriptKeyList');
     list.textContent = '';
+    animateIn(list, 'skm:' + dialogSeq + ':' + ctxId + ':' + ctxScript);
     const p = project(ctxId);
     const keys = p ? projectScriptKeys(p.id).filter((k) => !ctxScript || k.script_id === ctxScript) : [];
     const q = $('scriptKeySearch').value.trim().toLowerCase();
