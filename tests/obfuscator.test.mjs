@@ -101,3 +101,12 @@ test('실행 결과가 원본과 같다 (Lua 실행기가 있을 때만)', { ski
   assertSameOutput('local t = {}\nlocal function f(a) return a * 2 end\nprint(f(4), #t)');
   assertSameOutput('print(1 and nil, nil or false, 2 ^ 3 ^ 2, 1 .. 2 .. 3)');
 });
+
+test('마지막 인자로 온 함수 호출은 반환값을 모두 넘긴다', { skip: !LUA && 'lua 실행기가 없음' }, () => {
+  assertSameOutput('print(pcall(error, "x"))');
+  assertSameOutput('print(select(2, "a", "b", "c"))');
+  assertSameOutput('print(1, pcall(error, "z"))');
+  assertSameOutput('print((pcall(error, "y")))');
+  assertSameOutput('print(pcall(print))');
+  assertSameOutput('local t = 1 and pcall(error, "w")\nprint(t)');
+});
