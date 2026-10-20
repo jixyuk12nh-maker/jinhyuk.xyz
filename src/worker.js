@@ -1,5 +1,5 @@
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
-import { obfuscate } from './obfuscator.js';
+import { obfuscate, obfuscateBundle } from './obfuscator.js';
 const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 const OBJECT_META = { httpMetadata: { contentType: 'text/plain; charset=utf-8', cacheControl: 'no-store' } };
 const ROLES = ['owner', 'admin', 'user'];
@@ -68,31 +68,111 @@ const contentDisposition = (slug) => {
   const ascii = name.replace(/[^\x20-\x7e]/g, '_');
   return `inline; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 };
-const keyStub = (slug, origin) => `local request_fn = (syn and syn.request) or (http and http.request) or http_request or request
+// Lua 문자열 리터럴(바이트 단위 이스케이프). 엔진 텍스트를 로더 안에 넣을 때 쓴다.
+const luaQuote = (text) => {
+  let out = '"';
+  for (const b of new TextEncoder().encode(text)) {
+    out += b >= 32 && b <= 126 && b !== 34 && b !== 92 ? String.fromCharCode(b) : '\\' + String(b).padStart(3, '0');
+  }
+  return out + '"';
+};
+const keyStub = (slug, origin, engine) => `local request_fn = (syn and syn.request) or (http and http.request) or http_request or request
 assert(request_fn, "이 실행기는 request 함수를 지원하지 않습니다")
 assert(type(script_key) == "string" and script_key ~= "", "script_key를 먼저 설정하세요")
 local HttpService = game:GetService("HttpService")
 local hwid = "unknown"
 pcall(function() hwid = game:GetService("RbxAnalyticsService"):GetClientId() end)
 local function post(path, body)
-	return request_fn({ Url = "${origin}" .. path, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(body) })
+    return request_fn({ Url = "${origin}" .. path, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(body) })
+end
+local function fletcher(s)
+    local a, b = 1, 0
+    for i = 1, #s do
+        a = (a + string.byte(s, i)) % 65521
+        b = (b + a) % 65521
+    end
+    return b * 65521 + a
 end
 local started = post("/api/key-session", { slug = "${slug}", key = script_key, hwid = hwid })
 assert(started and started.StatusCode == 200, "스크립트 키 검증에 실패했습니다")
 local session = HttpService:JSONDecode(started.Body)
 assert(session and session.ok and type(session.token) == "string", "보안 세션을 만들 수 없습니다")
-local chunks = {}
-for index = 0, 5 do
-	local response = post("/api/key-chunk", { token = session.token, index = index })
-	assert(response and response.StatusCode == 200, "스크립트 조각 검증에 실패했습니다")
-	local part = HttpService:JSONDecode(response.Body)
-	assert(part and part.ok and part.index == index and part.total == 6 and type(part.chunk) == "string", "스크립트 조각이 유효하지 않습니다")
-	chunks[index + 1] = part.chunk
+local ENGINE = ${luaQuote(engine)}
+local PR, seen, got = {}, {}, 0
+for seq = 0, 5 do
+    local response = post("/api/key-chunk", { token = session.token, seq = seq })
+    assert(response and response.StatusCode == 200, "스크립트 조각 검증에 실패했습니다")
+    local part = HttpService:JSONDecode(response.Body)
+    assert(part and part.ok and part.total == 6 and type(part.index) == "number" and part.index >= 0 and part.index <= 5, "스크립트 조각이 유효하지 않습니다")
+    assert(not seen[part.index] and type(part.chunk) == "string", "스크립트 조각 순서가 잘못됐습니다")
+    assert(fletcher(part.chunk) == part.cf, "스크립트 조각 변조가 감지됐습니다")
+    seen[part.index] = true
+    local piece = assert(loadstring(part.chunk), "스크립트 조각을 읽을 수 없습니다")
+    for k, v in pairs(piece()) do PR[k] = v end
+    got = got + 1
 end
-local code = table.concat(chunks)
-assert(#code > 0, "스크립트 데이터가 비어 있습니다")
-loadstring(code)()
+assert(got == 6, "스크립트 조각이 모두 도착하지 않았습니다")
+local main = assert(loadstring(ENGINE), "엔진을 읽을 수 없습니다")()(PR)
+main()
 `;
+// R2 경로 규칙: scripts/<유저이름>/obfuscated/<id>.lua (난독화본), scripts/<유저이름>/raw/<id>.lua (원문).
+// 유저 이름이 경로에 못 쓰이면 유저 id 를 쓴다. 실제 경로는 D1(object_key, raw_object_key)에 저장되므로 기존 스크립트는 그대로 동작한다.
+async function ownerFolder(env, userId) {
+  const row = await env.DB.prepare('SELECT username FROM api_users WHERE id = ?').bind(userId).first();
+  return safeUsername(row?.username) ?? userId;
+}
+async function scriptObjectKeys(env, userId, scriptId, suffix = '') {
+  const folder = await ownerFolder(env, userId);
+  const name = suffix ? `${scriptId}-${suffix}` : scriptId;
+  return {
+    objectKey: `scripts/${folder}/obfuscated/${name}.lua`,
+    rawKey: `scripts/${folder}/raw/${name}.lua`,
+  };
+}
+
+// 저장 시 만드는 R2 객체 묶음. objectKey(scripts/<id>.lua) 기준으로 이름을 정한다.
+//   <base>.part0~5.lua      난독화본을 6조각으로 나눈 것 (조각 번호 = 인덱스)
+//   <base>.manifest.json    조각별 sha256/cf, 전체 sha256/len/fp
+//   <base>.loader.lua       키 모드 로더 (난독화됨, slug/origin 포함)
+function bundleKeys(objectKey) {
+  const base = objectKey.replace(/\.lua$/, '');
+  return {
+    parts: Array.from({ length: DELIVERY_CHUNK_COUNT }, (_, i) => `${base}.part${i + 1}.lua`),
+    manifest: `${base}.manifest.json`,
+    engine: `${base}.engine.lua`,
+    loader: `${base}.loader.lua`,
+  };
+}
+function allBundleKeys(objectKey) {
+  if (!objectKey) return [];
+  const k = bundleKeys(objectKey);
+  return [objectKey, ...k.parts, k.manifest, k.engine, k.loader];
+}
+// 저장할 때 한 번만 호출한다. 조각 6개 → 엔진 → 매니페스트 → 로더 순으로 쓴다. 매니페스트가 있어야 전송이 시작된다.
+async function putDelivery(env, { objectKey, bundle, servedDigest, slug, origin }) {
+  const keys = bundleKeys(objectKey);
+  const parts = [];
+  for (let i = 0; i < DELIVERY_CHUNK_COUNT; i++) {
+    const text = bundle.parts[i];
+    parts.push({ sha: await sha256Hex(text), cf: fletcher(text) });
+    await env.BUCKET.put(keys.parts[i], text, OBJECT_META);
+  }
+  await env.BUCKET.put(keys.engine, bundle.engine, OBJECT_META);
+  const manifest = { v: 2, full_sha: servedDigest, parts };
+  await env.BUCKET.put(keys.manifest, JSON.stringify(manifest), OBJECT_META);
+  await putLoader(env, objectKey, slug, origin);
+}
+// 로더는 엔진을 R2에서 읽어 만든다 (slug 가 바뀌었을 때도 이것만 다시 만든다)
+async function putLoader(env, objectKey, slug, origin) {
+  const keys = bundleKeys(objectKey);
+  const engineObj = await env.BUCKET.get(keys.engine);
+  if (!engineObj) throw new HttpError(500, '엔진 객체가 없습니다. 스크립트를 다시 저장하세요.');
+  const loader = await obfuscateLua(env, keyStub(slug, origin, await engineObj.text()));
+  await env.BUCKET.put(keys.loader, loader, OBJECT_META);
+}
+async function bundleDigest(bundle) {
+  return sha256Hex(bundle.engine + '\u0000' + bundle.parts.join('\u0000'));
+}
 const safeUsername = (value) => {
   const v = String(value ?? '').trim();
   return /^[A-Za-z0-9_.-]{2,40}$/.test(v) ? v : null;
@@ -148,7 +228,8 @@ async function audit(env, request, auth, action, target, status) {
 }
 
 const TURNSTILE_CLEARANCE_SECONDS = 1800;
-const DECOY_CODE = 'local function _safe_result() return nil end\nreturn _safe_result()';
+// 가짜 응답(decoy)도 난독화본만 보낸다. 빌드 시 obfuscate(원문 decoy, antiTamper:false) 결과를 상수로 둔다.
+const DECOY_OBF = "local __vm56a42e62 = (function(_2cff6bda)\n  local unpack = unpack or table.unpack\n  local _19e9872f = _G\n  local getfenv = getfenv or function() return _G end\n  local setfenv = setfenv or function() end\n  local _5f04e5c4 = (bit32 and bit32.bxor) or function(_34fad1c2, _09d8e5e5)\n    local _8dde9f5a, _5b79b666 = 0, 1\n    while _34fad1c2 > 0 or _09d8e5e5 > 0 do\n      local _f36da3bf, _32c47afa = _34fad1c2 % 2, _09d8e5e5 % 2\n      if _f36da3bf ~= _32c47afa then _8dde9f5a = _8dde9f5a + _5b79b666 end\n      _34fad1c2, _09d8e5e5, _5b79b666 = (_34fad1c2 - _f36da3bf) / 2, (_09d8e5e5 - _32c47afa) / 2, _5b79b666 * 2\n    end\n    return _8dde9f5a\n  end\n  local _d6d93788 = _5f04e5c4(3741516, 42405)\n  local function _e595edcc(...) return { n = select(\"#\", ...), ... } end\n  -- base64 변형: 문자 4개 = 24비트 값 하나 (little-endian). 이스케이프 없이 문자열에 바로 들어간다.\n  local B64 = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\"\n  local MAPV = {}\n  for _c5ca279f = 1, 64 do MAPV[string.byte(B64, _c5ca279f)] = _c5ca279f - 1 end\n  local function unb64(_4ace96cc)\n    local _4ad4c841, n = {}, 0\n    for _c5ca279f = 1, #_4ace96cc, 4 do\n      local c1, c2, c3, c4 = string.byte(_4ace96cc, _c5ca279f, _c5ca279f + 3)\n      local _d03fcce1 = MAPV[c1] + MAPV[c2] * 64 + MAPV[c3] * 4096 + MAPV[c4] * 262144\n      n = n + 1\n      _4ad4c841[n] = string.char(_d03fcce1 % 256, math.floor(_d03fcce1 / 256) % 256, math.floor(_d03fcce1 / 65536) % 256)\n    end\n    return table.concat(_4ad4c841)\n  end\n  -- 문자열 상수: 바이트마다 키가 달라진다 (compile 쪽 kbAt과 같은 식)\n  local function _ae3ab974(_4ace96cc, _57daf2b2, ln)\n    local raw = unb64(_4ace96cc)\n    local _4ad4c841 = {}\n    for _c5ca279f = 1, ln do\n      local _7eb07bec = _c5ca279f - 1\n      local _7de0737a = (_57daf2b2 + _7eb07bec * 73 + (_7eb07bec * _7eb07bec) % 251) % 256\n      _4ad4c841[_c5ca279f] = string.char(_5f04e5c4(string.byte(raw, _c5ca279f), _7de0737a))\n    end\n    return table.concat(_4ad4c841)\n  end\n  -- 명령 블롭: 값마다 키 스트림으로 가려져 있다. compile 쪽 ksAt과 같은 식이다.\n  -- 로드 때 한 번만 풀고, 실행 루프에는 XOR이 없다.\n  local function _0f3e5807(_4ace96cc, sl)\n    local _4ad4c841, n, _5e5aa3e1 = {}, 0, 0\n    for _c5ca279f = 1, #_4ace96cc, 4 do\n      local c1, c2, c3, c4 = string.byte(_4ace96cc, _c5ca279f, _c5ca279f + 3)\n      local _d03fcce1 = MAPV[c1] + MAPV[c2] * 64 + MAPV[c3] * 4096 + MAPV[c4] * 262144\n      local _f36da3bf = (n * 2654435761 + sl) % 8388608\n      _f36da3bf = (_f36da3bf * _f36da3bf + _d6d93788) % 8388608\n      _f36da3bf = (_f36da3bf + _5e5aa3e1 * 131) % 8388608\n      local _18f9adf1 = _5f04e5c4(_d03fcce1, _f36da3bf)\n      n = n + 1\n      _4ad4c841[n] = _18f9adf1\n      _5e5aa3e1 = _18f9adf1\n    end\n    return _4ad4c841\n  end\n  -- 5.3 정수 연산. 64비트 두 보수를 32비트 두 조각(lo, hi)으로 나눠 처리한다. 모든 중간값은 2^53 안에서 정확하다.\n  -- 2^53을 넘는 결과는 부동소수점이라 정밀도가 떨어진다 (문서 참고).\n  local TWO32, TWO63, TWO64 = 2 ^ 32, 2 ^ 63, 2 ^ 64\n  local mtype = math.type\n  local shl, shr\n  local function split(_34fad1c2)\n    _34fad1c2 = math.floor(_34fad1c2)\n    return _34fad1c2 % TWO32, math.floor(_34fad1c2 / TWO32) % TWO32\n  end\n  local function join(lo, hi)\n    if hi >= 2147483648 then return math.floor((hi - TWO32) * TWO32 + lo) end\n    return math.floor(hi * TWO32 + lo)\n  end\n  local function idiv(_34fad1c2, _09d8e5e5)\n    local q = math.floor(_34fad1c2 / _09d8e5e5)\n    if mtype and (mtype(_34fad1c2) == \"float\" or mtype(_09d8e5e5) == \"float\" or type(_34fad1c2) == \"string\" or type(_09d8e5e5) == \"string\") then return q + 0.0 end\n    return q\n  end\n  local function b32(_d4de930b, _f36da3bf, _32c47afa)\n    local _8dde9f5a, _5b79b666 = 0, 1\n    for _ = 1, 32 do\n      local bx, by = _f36da3bf % 2, _32c47afa % 2\n      local bit\n      if _d4de930b == 1 then bit = bx * by\n      elseif _d4de930b == 2 then bit = (bx + by > 0) and 1 or 0\n      else bit = (bx ~= by) and 1 or 0 end\n      _8dde9f5a = _8dde9f5a + bit * _5b79b666\n      _f36da3bf, _32c47afa, _5b79b666 = (_f36da3bf - bx) / 2, (_32c47afa - by) / 2, _5b79b666 * 2\n    end\n    return _8dde9f5a\n  end\n  local function bitw(_d4de930b, _34fad1c2, _09d8e5e5)\n    local al, ah = split(_34fad1c2)\n    local bl, bh = split(_09d8e5e5)\n    return join(b32(_d4de930b, al, bl), b32(_d4de930b, ah, bh))\n  end\n  shl = function(_34fad1c2, n)\n    n = math.floor(n)\n    if n < 0 then return shr(_34fad1c2, -n) end\n    if n >= 64 then return 0 end\n    if n == 0 then return math.floor(_34fad1c2) end\n    local lo, hi = split(_34fad1c2)\n    if n >= 32 then return join(0, (lo * 2 ^ (n - 32)) % TWO32) end\n    local nlo = (lo * 2 ^ n) % TWO32\n    local nhi = ((hi % 2 ^ (32 - n)) * 2 ^ n + math.floor(lo / 2 ^ (32 - n))) % TWO32\n    return join(nlo, nhi)\n  end\n  shr = function(_34fad1c2, n) -- 논리 시프트 (5.3의 >> 는 부호 없는 시프트)\n    n = math.floor(n)\n    if n < 0 then return shl(_34fad1c2, -n) end\n    if n >= 64 then return 0 end\n    if n == 0 then return math.floor(_34fad1c2) end\n    local lo, hi = split(_34fad1c2)\n    if n >= 32 then return math.floor(hi / 2 ^ (n - 32)) end\n    return math.floor(hi * 2 ^ (32 - n) + math.floor(lo / 2 ^ n))\n  end\n  local function bnot(_34fad1c2) return -math.floor(_34fad1c2) - 1 end\n  -- 5.3 실행기(math.type 과 load 가 있음)에서는 내장 연산을 쓴다. 5.1 계열에서는 NAT 가 nil 이라 위 근사 구현을 쓴다.\n  local NAT = nil\n  if mtype and (load or loadstring) then\n    local okn, fns = pcall(function()\n      return { (load or loadstring)(\"return function(a, b) return a // b end, function(a, b) return a & b end, function(a, b) return a | b end, function(a, b) return a ~ b end, function(a, b) return a << b end, function(a, b) return a >> b end, function(a) return ~a end\")() }\n    end)\n    if okn and fns and fns[1] then NAT = fns end\n  end\n  local _4735e893 = {\n    [1] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 + _09d8e5e5 end,\n    [2] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 - _09d8e5e5 end,\n    [3] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 * _09d8e5e5 end,\n    [4] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 / _09d8e5e5 end,\n    [5] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 .. _09d8e5e5 end,\n    [6] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 == _09d8e5e5 end,\n    [7] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 ~= _09d8e5e5 end,\n    [8] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 < _09d8e5e5 end,\n    [9] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 <= _09d8e5e5 end,\n    [10] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 > _09d8e5e5 end,\n    [11] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 >= _09d8e5e5 end,\n    [12] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 % _09d8e5e5 end,\n    [13] = function(_34fad1c2, _09d8e5e5) return _34fad1c2 ^ _09d8e5e5 end,\n    [14] = function(_34fad1c2, _09d8e5e5) if NAT then return NAT[1](_34fad1c2, _09d8e5e5) end return idiv(_34fad1c2, _09d8e5e5) end,\n    [15] = function(_34fad1c2, _09d8e5e5) if NAT then return NAT[2](_34fad1c2, _09d8e5e5) end return bitw(1, _34fad1c2, _09d8e5e5) end,\n    [16] = function(_34fad1c2, _09d8e5e5) if NAT then return NAT[3](_34fad1c2, _09d8e5e5) end return bitw(2, _34fad1c2, _09d8e5e5) end,\n    [17] = function(_34fad1c2, _09d8e5e5) if NAT then return NAT[4](_34fad1c2, _09d8e5e5) end return bitw(3, _34fad1c2, _09d8e5e5) end,\n    [18] = function(_34fad1c2, _09d8e5e5) if NAT then return NAT[5](_34fad1c2, _09d8e5e5) end return shl(_34fad1c2, _09d8e5e5) end,\n    [19] = function(_34fad1c2, _09d8e5e5) if NAT then return NAT[6](_34fad1c2, _09d8e5e5) end return shr(_34fad1c2, _09d8e5e5) end,\n  }\n  local _e3de4954 = {\n    [1] = function(_34fad1c2) return -_34fad1c2 end,\n    [2] = function(_34fad1c2) return not _34fad1c2 end,\n    [3] = function(_34fad1c2) return #_34fad1c2 end,\n    [4] = function(_34fad1c2) if NAT then return NAT[7](_34fad1c2) end return bnot(_34fad1c2) end,\n  }\n  local function _dead(_f36da3bf)\n    if _f36da3bf == nil then return _f36da3bf end\n    local _32c47afa = _5f04e5c4(_f36da3bf, _d6d93788)\n    if _32c47afa ~= _32c47afa then return _32c47afa end\n    return _32c47afa + 0\n  end\n  -- 함수 원형을 처음 쓸 때 한 번만 푼다: 명령 블롭, 상수, 업밸류 기술자\n  local function _13a201ec(sl, n)\n    local _f36da3bf = (n * 2654435761 + sl) % 8388608\n    return (_f36da3bf * _f36da3bf + _d6d93788) % 8388608\n  end\n  -- Fletcher 류 체크섬 (mod 65521). _27466b48 = {_34fad1c2, _09d8e5e5}, 값은 0 이상 2^24 미만 정수\n  local function _21eede5f(_27466b48, _f36da3bf)\n    local _34fad1c2 = (_27466b48[1] + _f36da3bf) % 65521\n    _27466b48[1] = _34fad1c2\n    _27466b48[2] = (_27466b48[2] + _34fad1c2) % 65521\n  end\n  -- 실행 환경 감시: 전역 getfenv 교체, 디버그 훅 설치를 잡는다. _faabedf4 와 같은 주기로 돈다.\n  local _a74a1491 = rawget(_19e9872f, \"getfenv\")\n  local function _9cada147() error(\"VM: integrity\", 0) end\n  local function _0f5a9c15()\n    if rawget(_19e9872f, \"getfenv\") ~= _a74a1491 then _9cada147() end\n    local _10e185fc = rawget(_19e9872f, \"debug\")\n    if _10e185fc and _10e185fc.gethook and _10e185fc.gethook() ~= nil then _9cada147() end\n  end\n  -- 시작 때 한 번: 디버거로 한 줄씩 밟으면 시간이 크게 늘어난다 (임계값은 정상 실행의 수백 배)\n  local function _aa0b6bba()\n    if not os or not os.clock then return end\n    local _6cfff21f, _b7c02558 = os.clock(), 0\n    for _c5ca279f = 1, 20000 do _b7c02558 = _b7c02558 + _c5ca279f end\n    if os.clock() - _6cfff21f > 1.5 then _9cada147() end\n  end\n  -- 상수: 복호화 전 암호문 상태로 로드 때 한 번 검사한다\n  local function _5a0a8196(_a61ac96e)\n    local _1a767486, _27466b48 = _a61ac96e.k, { 1, 0 }\n    for _c5ca279f = 1, _a61ac96e.nk do\n      local _d03fcce1 = _1a767486[_c5ca279f]\n      if type(_d03fcce1) == \"table\" then\n        _21eede5f(_27466b48, 4); _21eede5f(_27466b48, _d03fcce1.ek); _21eede5f(_27466b48, _d03fcce1.ln); _21eede5f(_27466b48, _d03fcce1.t == \"n\" and 1 or 0)\n        local _4a0454af = _d03fcce1.es\n        for _7eb07bec = 1, #_4a0454af do _21eede5f(_27466b48, string.byte(_4a0454af, _7eb07bec)) end\n      elseif _d03fcce1 == nil then\n        _21eede5f(_27466b48, 1)\n      else\n        _21eede5f(_27466b48, 2); _21eede5f(_27466b48, _d03fcce1 and 1 or 0)\n      end\n    end\n    if _27466b48[2] * 65521 + _27466b48[1] ~= _5f04e5c4(_a61ac96e.hk, _d6d93788) then error(\"VM: integrity\", 0) end\n  end\n  -- 명령과 업밸류: 디코드된 평문을 호출마다 다시 검사한다 (메모리 패치 감지)\n  local function _faabedf4(_a61ac96e)\n    _0f5a9c15()\n    local _4a621435, _a0cdfd22 = _a61ac96e.c, _a61ac96e.u\n    local _3b809aae, _278ee826 = 1, 0\n    local _c0469dc3, _6c3934c8, _6a9cfc37, _1029ed11 = _a61ac96e.np, _a61ac96e.va and 1 or 0, _a61ac96e.nu, _a61ac96e.nk\n    _3b809aae = (_3b809aae + _c0469dc3) % 65521; _278ee826 = (_278ee826 + _3b809aae) % 65521\n    _3b809aae = (_3b809aae + _6c3934c8) % 65521; _278ee826 = (_278ee826 + _3b809aae) % 65521\n    _3b809aae = (_3b809aae + _6a9cfc37) % 65521; _278ee826 = (_278ee826 + _3b809aae) % 65521\n    _3b809aae = (_3b809aae + _1029ed11) % 65521; _278ee826 = (_278ee826 + _3b809aae) % 65521\n    for _c5ca279f = 1, #_4a621435 do _3b809aae = (_3b809aae + _4a621435[_c5ca279f]) % 65521; _278ee826 = (_278ee826 + _3b809aae) % 65521 end\n    for _c5ca279f = 1, _a61ac96e.nu * 2 do _3b809aae = (_3b809aae + _a0cdfd22[_c5ca279f]) % 65521; _278ee826 = (_278ee826 + _3b809aae) % 65521 end\n    if _278ee826 * 65521 + _3b809aae ~= _5f04e5c4(_a61ac96e.hc, _d6d93788) then error(\"VM: integrity\", 0) end\n  end\n  local function _db941e4e(_a61ac96e)\n    if not _a61ac96e.ready then\n      if type(_a61ac96e.c) == \"string\" then _a61ac96e.c = _0f3e5807(_a61ac96e.c, _a61ac96e.sl) end\n      for _c5ca279f = 1, _a61ac96e.nu * 2 do _a61ac96e.u[_c5ca279f] = _5f04e5c4(_a61ac96e.u[_c5ca279f], _13a201ec(_a61ac96e.sl, 1048576 + _c5ca279f)) end\n      _5a0a8196(_a61ac96e)\n      local _1a767486 = _a61ac96e.k\n      for _c5ca279f = 1, _a61ac96e.nk do\n        local _d03fcce1 = _1a767486[_c5ca279f]\n        if type(_d03fcce1) == \"table\" and _d03fcce1.ek then\n          local _4ace96cc = _ae3ab974(_d03fcce1.es, _d03fcce1.ek, _d03fcce1.ln)\n          if _d03fcce1.t == \"n\" then _1a767486[_c5ca279f] = tonumber(_4ace96cc) else _1a767486[_c5ca279f] = _4ace96cc end\n        end\n      end\n      -- 재검사 간격은 함수/빌드마다 다르다 (고정 상수가 없어야 패치 지점을 못 찾는다)\n      _a61ac96e.cs = _5f04e5c4(_a61ac96e.cs, _d6d93788)\n      _a61ac96e.ready = true\n    end\n    -- 로드 때는 항상 검사하고, 이후에는 함수마다 다른 간격(24~80회)으로 다시 검사한다\n    local n = _a61ac96e.cn + 1\n    _a61ac96e.cn = n\n    if n % _a61ac96e.cs == 1 then _faabedf4(_a61ac96e) end\n  end\n  local _0f38c319\n  _0f38c319 = function(_a61ac96e, _596cd8ed, E, SF, ...)\n    local ENV = E\n    _db941e4e(_a61ac96e)\n    local _4a621435 = _a61ac96e.c\n    local _4b026ee4 = _a61ac96e.pm\n    local _1a767486 = _a61ac96e.k\n    local _661ec7b3 = _e595edcc(...)\n    local _3fe2c1f0 = {}\n    for _c5ca279f = 1, _a61ac96e.np do _3fe2c1f0[_c5ca279f] = { _661ec7b3[_c5ca279f] } end\n    local _f698019c, _495b3ec6 = {}, 0\n    local _3a60807c\n    local _b90eb409 = 1\n    local function _f9ca5d41(_d03fcce1) _495b3ec6 = _495b3ec6 + 1; _f698019c[_495b3ec6] = _d03fcce1 end\n    local function _82f1e6a1() local _d03fcce1 = _f698019c[_495b3ec6]; _f698019c[_495b3ec6] = nil; _495b3ec6 = _495b3ec6 - 1; return _d03fcce1 end\n    while true do\n      local _d4de930b, _34fad1c2, _09d8e5e5 = _4b026ee4[_4a621435[_b90eb409]], _4a621435[_b90eb409 + 1], _4a621435[_b90eb409 + 2]\n      _b90eb409 = _b90eb409 + 3\n      if _d4de930b <= 102 then\nif _d4de930b <= 81 then\nif _d4de930b <= 34 then\nif _d4de930b <= 33 then\nif _d4de930b == 27 then\n        local _71ba68aa = _82f1e6a1()\n        if _71ba68aa ~= nil and _71ba68aa ~= false then _b90eb409 = 3 * _34fad1c2 + 1 end\nelseif _d4de930b == 29 then\n        local _c5ca279f, _c8c41fd3, _27466b48 = _3fe2c1f0[_34fad1c2][1], _3fe2c1f0[_34fad1c2 + 1][1], _3fe2c1f0[_34fad1c2 + 2][1]\n        if _27466b48 > 0 then _f9ca5d41(_c5ca279f <= _c8c41fd3) else _f9ca5d41(_c8c41fd3 <= _c5ca279f) end\nelseif _d4de930b == 33 then\n        local _175711ed = _82f1e6a1(); local _a9109abd = _f698019c[_495b3ec6]\n        for _7eb07bec = 1, _175711ed.n do _a9109abd[_34fad1c2 + _7eb07bec - 1] = _175711ed[_7eb07bec] end\nelseif _d4de930b == 16 then\n        local _d66f3acb, _4ace96cc, _09654e71 = _3fe2c1f0[_34fad1c2][1], _3fe2c1f0[_34fad1c2 + 1][1], _3fe2c1f0[_34fad1c2 + 2][1]\n        local _175711ed = _e595edcc(_d66f3acb(_4ace96cc, _09654e71))\n        _3fe2c1f0[_34fad1c2 + 3] = { _175711ed }\n        if _175711ed[1] ~= nil then _3fe2c1f0[_34fad1c2 + 2][1] = _175711ed[1]; _f9ca5d41(true) else _f9ca5d41(false) end\n        else\n        error(\"VM: bad opcode\")\n        end\n      else\nif _d4de930b == 34 then\n        _f9ca5d41(_3fe2c1f0[_34fad1c2][1][_09d8e5e5])\n        else\n        error(\"VM: bad opcode\")\n        end\n      end\n      else\nif _d4de930b <= 56 then\nif _d4de930b <= 37 then\nif _d4de930b == 37 then\n        local _d03fcce1 = _82f1e6a1(); _f698019c[_495b3ec6][_34fad1c2] = _d03fcce1\n        else\n        error(\"VM: bad opcode\")\n        end\n      else\nif _d4de930b == 48 then\n        _f9ca5d41(_3fe2c1f0[_34fad1c2][1])\nelseif _d4de930b == 56 then\n        local _d03fcce1 = _82f1e6a1(); local _57daf2b2 = _82f1e6a1(); _f698019c[_495b3ec6][_57daf2b2] = _d03fcce1\nelseif _d4de930b == 51 then\n        _82f1e6a1()\nelseif _d4de930b == 45 then\n        _3fe2c1f0[_34fad1c2][1] = _82f1e6a1()\n        else\n        error(\"VM: bad opcode\")\n        end\n      end\n      else\nif _d4de930b == 77 then\n        local _10599c6d = _82f1e6a1(); local _a9109abd = _f698019c[_495b3ec6]\n        for _7eb07bec = 1, _10599c6d.n do _a9109abd.n = _a9109abd.n + 1; _a9109abd[_a9109abd.n] = _10599c6d[_7eb07bec] end\nelseif _d4de930b == 81 then\n        local _175711ed = _82f1e6a1(); local _d66f3acb = _82f1e6a1()\n        -- Lua 5.1: getfenv/setfenv 의 레벨 1 은 \"이 함수\" 이므로 실행 중인 클로저(SF)를 가리킨다\n        if _d66f3acb == getfenv and (_175711ed.n == 0 or _175711ed[1] == 1) then _f9ca5d41(_e595edcc(getfenv(SF)))\n        elseif _d66f3acb == setfenv and _175711ed[1] == 1 and type(_175711ed[2]) == \"table\" then\n          setfenv(SF, _175711ed[2]); ENV = _175711ed[2]; _f9ca5d41(_e595edcc(SF))\n        else\n          _f9ca5d41(_e595edcc(_d66f3acb(unpack(_175711ed, 1, _175711ed.n))))\n        end\n        else\n        error(\"VM: bad opcode\")\n        end\n      end\n      end\n      else\nif _d4de930b <= 89 then\nif _d4de930b == 89 then\n        _3fe2c1f0[_34fad1c2] = { _82f1e6a1() }\n        else\n        error(\"VM: bad opcode\")\n        end\n      else\nif _d4de930b == 92 then\n        _f9ca5d41({})\nelseif _d4de930b == 102 then\n        _f9ca5d41(_661ec7b3[1])\nelseif _d4de930b == 101 then\n        local _71ba68aa = _3fe2c1f0[_34fad1c2]\n        local _d03fcce1 = _71ba68aa and _71ba68aa[1]\n        if _71ba68aa then _71ba68aa[1] = nil end\n        if _d03fcce1 ~= nil and _d03fcce1 ~= false then\n          local mt = getmetatable(_d03fcce1)\n          local cm = mt and mt.__close\n          if cm then cm(_d03fcce1, nil) end\n        end\nelseif _d4de930b == 94 then\n        local _71ba68aa = _3fe2c1f0[_34fad1c2]\n        local _d03fcce1 = _71ba68aa and _71ba68aa[1]\n        if _d03fcce1 ~= nil and _d03fcce1 ~= false then\n          local mt = getmetatable(_d03fcce1)\n          if not (mt and mt.__close) then error(\"variable got a non-closable value\") end\n        end\n        else\n        error(\"VM: bad opcode\")\n        end\n      end\n      end\n      else\nif _d4de930b <= 186 then\nif _d4de930b <= 165 then\nif _d4de930b <= 120 then\nif _d4de930b == 120 then\n        \nelseif _d4de930b == 114 then\n        _f9ca5d41(_596cd8ed[_34fad1c2][1])\n        else\n        error(\"VM: bad opcode\")\n        end\n      else\nif _d4de930b <= 131 then\nif _d4de930b == 131 then\n        local _d03fcce1 = _82f1e6a1(); local _a9109abd = _f698019c[_495b3ec6]\n        _a9109abd.n = _a9109abd.n + 1; _a9109abd[_a9109abd.n] = _d03fcce1\n        else\n        error(\"VM: bad opcode\")\n        end\n      else\nif _d4de930b == 153 then\n        local _175711ed = _82f1e6a1(); _f9ca5d41(_175711ed[1])\nelseif _d4de930b == 161 then\n        local _c33694bb, _bd7d4415, _4c7a00b9 = tonumber(_3fe2c1f0[_34fad1c2][1]), tonumber(_3fe2c1f0[_34fad1c2 + 1][1]), tonumber(_3fe2c1f0[_34fad1c2 + 2][1])\n        if not _c33694bb then error(\"'for' initial value must be a number\") end\n        if not _bd7d4415 then error(\"'for' limit must be a number\") end\n        if not _4c7a00b9 then error(\"'for' step must be a number\") end\n        _3fe2c1f0[_34fad1c2][1], _3fe2c1f0[_34fad1c2 + 1][1], _3fe2c1f0[_34fad1c2 + 2][1] = _c33694bb, _bd7d4415, _4c7a00b9\nelseif _d4de930b == 165 then\n        local _175711ed = _82f1e6a1()\n        for _7eb07bec = 1, _34fad1c2 do _f9ca5d41(_175711ed[_7eb07bec]) end\nelseif _d4de930b == 155 then\n        local _e7bce034 = _2cff6bda[_34fad1c2]\n        _db941e4e(_e7bce034)\n        local _3e333e0e = {}\n        for _c5ca279f = 1, _e7bce034.nu do\n          local _0dd0a345 = _e7bce034.u[2 * _c5ca279f - 1]\n          local _f4b4aa7c = _e7bce034.u[2 * _c5ca279f]\n          if _0dd0a345 == 1 then _3e333e0e[_c5ca279f] = _3fe2c1f0[_f4b4aa7c] else _3e333e0e[_c5ca279f] = _596cd8ed[_f4b4aa7c] end\n        end\n        local FN\n        FN = function(...) return _0f38c319(_e7bce034, _3e333e0e, getfenv(FN), FN, ...) end\n        setfenv(FN, ENV)\n        _f9ca5d41(FN)\n        else\n        error(\"VM: bad opcode\")\n        end\n      end\n      end\n      else\nif _d4de930b == 186 then\n        _f9ca5d41(_661ec7b3)\nelseif _d4de930b == 185 then\n        _f9ca5d41(_e3de4954[_34fad1c2](_82f1e6a1()))\nelseif _d4de930b == 167 then\n        local _71ba68aa = _82f1e6a1()\n        if _71ba68aa == nil or _71ba68aa == false then _b90eb409 = 3 * _34fad1c2 + 1 end\nelseif _d4de930b == 175 then\n        local _57daf2b2 = _82f1e6a1(); local _a9109abd = _82f1e6a1(); _f9ca5d41(_a9109abd[_57daf2b2])\n        else\n        error(\"VM: bad opcode\")\n        end\n      end\n      else\nif _d4de930b <= 234 then\nif _d4de930b <= 223 then\nif _d4de930b == 223 then\n        _b90eb409 = 3 * _34fad1c2 + 1\nelseif _d4de930b == 219 then\n        _f9ca5d41(ENV[_1a767486[_34fad1c2]])\nelseif _d4de930b == 212 then\n        ENV[_1a767486[_34fad1c2]] = _82f1e6a1()\nelseif _d4de930b == 198 then\n        local _d03fcce1 = _82f1e6a1(); local _57daf2b2 = _82f1e6a1(); local _a9109abd = _82f1e6a1(); _a9109abd[_57daf2b2] = _d03fcce1\n        else\n        error(\"VM: bad opcode\")\n        end\n      else\nif _d4de930b == 232 then\n        _f9ca5d41(_1a767486[_34fad1c2])\nelseif _d4de930b == 233 then\n        _3fe2c1f0[_34fad1c2][1] = _3fe2c1f0[_34fad1c2][1] + _3fe2c1f0[_34fad1c2 + 2][1]\nelseif _d4de930b == 229 then\n        local _002b4177 = _82f1e6a1(); _f9ca5d41(_002b4177[_1a767486[_34fad1c2]]); _f9ca5d41({ n = 1, _002b4177 })\nelseif _d4de930b == 234 then\n        _f9ca5d41({ n = 0 })\n        else\n        error(\"VM: bad opcode\")\n        end\n      end\n      else\nif _d4de930b == 240 then\n        _f9ca5d41(_f698019c[_495b3ec6])\nelseif _d4de930b == 249 then\n        local _32c47afa = _82f1e6a1(); local _f36da3bf = _82f1e6a1(); _f9ca5d41(_4735e893[_34fad1c2](_f36da3bf, _32c47afa))\nelseif _d4de930b == 244 then\n        _3a60807c = _82f1e6a1(); break\nelseif _d4de930b == 236 then\n        _596cd8ed[_34fad1c2][1] = _82f1e6a1()\n        else\n        error(\"VM: bad opcode\")\n        end\n      end\n      end\n      end\n    end\n    return unpack(_3a60807c, 1, _3a60807c.n)\n  end\n  local W\n  local _2c2646a4 = false\n  W = function(...)\n    if not _2c2646a4 then _2c2646a4 = true; _aa0b6bba() end\n    return _0f38c319(_2cff6bda[1], {}, getfenv(W), W, ...)\n  end\n  return W\nend)({\n  (function() return { c = \"KgLXkSYIR+yMQysExVHQpUtOV7zAanXGiwNf78gLY/TLtHUeyA0EYOvelsAM84sMsuAGeS/MxCoHJW4e/8jb2CKJFIFWn/yHZeHLckVbLtmbZ53CnopJ6DkWhCzfdRIGylmQB9eOlryf61cEiahcX1FIMQ4GQtJZ5/7e5r5XD8XE6PGevS7f2Sod1jWYC8uFPQmGQg+aiHiCSVmdXQLMpc7N1VMDaS6LCt6HBPYXSKVaFJgQ3BKaA0UXq/qHyxhLPR5C5BcN\", k = { { es = \"qTbSUArfCsNA\", ek = 140, ln = 8 }, { es = \"DyFC\", ek = 231, ln = 3 }, { es = \"0hL6eQU8\", ek = 66, ln = 6, t = \"n\" }, { es = \"/rIUwbLVQE6UYAAA\", ek = 157, ln = 10 }, { es = \"OLXvvXBA\", ek = 248, ln = 5, t = \"n\" }, { es = \"hxa3EQL7\", ek = 83, ln = 6, t = \"n\" }, { es = \"d2MfmCNB\", ek = 174, ln = 6, t = \"n\" }, { es = \"4MWqZngt\", ek = 9, ln = 6, t = \"n\" } }, nk = 8, sl = 1172899, u = {  }, nu = 0, np = 0, va = true, hc = 2084507072, hk = 3383425335, cs = 3781288, cn = 0, pm = { 181, 130, 153, 101, 180, 243, 217, 192, 204, 44, 98, 148, 74, 80, 160, 131, 229, 196, 154, 91, 100, 50, 227, 75, 152, 241, 187, 165, 59, 249, 49, 146, 10, 113, 237, 162, 144, 86, 97, 96, 30, 197, 218, 81, 208, 125, 15, 32, 116, 56, 254, 190, 36, 216, 108, 223, 94, 211, 176, 203, 57, 90, 137, 37, 210, 230, 151, 40, 83, 209, 178, 157, 172, 115, 21, 55, 171, 132, 76, 251, 173, 68, 84, 88, 169, 79, 28, 13, 61, 212, 53, 99, 4, 17, 111, 182, 183, 105, 138, 158, 114, 206, 201, 2, 236, 150, 47, 1, 24, 226, 234, 149, 156, 38, 65, 67, 78, 8, 177, 139, 140, 73, 5, 70, 179, 133, 106, 3, 185, 112, 124, 224, 159, 194, 16, 60, 252, 246, 27, 184, 214, 19, 141, 22, 233, 39, 221, 147, 122, 69, 107, 145, 42, 142, 174, 231, 155, 87, 189, 18, 202, 48, 220, 143, 12, 23, 20, 235, 128, 198, 245, 66, 117, 110, 85, 186, 215, 129, 242, 170, 163, 121, 126, 232, 103, 89, 225, 205, 248, 200, 188, 41, 167, 92, 104, 71, 34, 199, 118, 238, 168, 52, 45, 166, 95, 102, 119, 134, 120, 191, 35, 62, 161, 219, 175, 250, 123, 247, 213, 207, 51, 82, 244, 31, 93, 239, 33, 25, 29, 77, 43, 240, 14, 222, 58, 64, 253, 193, 9, 109, 164, 135, 136, 195, 26, 127, 228, 11, 54, 46, 7, 63, 6, 72 } } end)(),\n  (function() return { c = \"IHnEvJkHkqxdaRcHu+jE+R+Usr2YIQHQi1wary0Yy6ZKE6JPShaHn6ITpvISDImEvnkKH7tDGwXQ/dfQNl4D/RvKv2EFqJrSoeuTH4NIRbBQMWRLdM+Z4E9bpUaRNFXaFofWtrIG2jPJi4nfi3dJa80GAQXXX7Ybz7QLs0UDnkjW3F/drkiLZUCdOf3WatFW\", k = { { es = \"9f6TCAAA\", ek = 139, ln = 4 }, { es = \"XG1D9uXGkuHA\", ek = 230, ln = 8 }, { es = \"nc+oOFho4VwuFBAA\", ek = 65, ln = 10 }, { es = \"zz5QuDAA\", ek = 156, ln = 4 }, { es = \"GDnvirhT\", ek = 247, ln = 6, t = \"n\" }, { es = \"hVK2D4L4\", ek = 82, ln = 6, t = \"n\" }, { es = \"aCcdnaNA\", ek = 173, ln = 5, t = \"n\" }, { es = \"5M2pfvAu\", ek = 8, ln = 6, t = \"n\" } }, nk = 8, sl = 4994722, u = {  }, nu = 0, np = 2, va = true, hc = 1683833233, hk = 934439191, cs = 3781326, cn = 0, pm = { 72, 175, 46, 236, 7, 201, 125, 154, 216, 59, 152, 20, 227, 78, 103, 155, 121, 235, 24, 141, 164, 225, 244, 165, 178, 137, 208, 143, 130, 220, 32, 81, 11, 38, 101, 4, 13, 229, 223, 118, 191, 84, 151, 57, 67, 50, 54, 241, 144, 218, 112, 115, 192, 215, 33, 15, 240, 224, 158, 193, 61, 80, 108, 203, 95, 135, 88, 28, 65, 56, 106, 228, 105, 132, 111, 212, 23, 172, 12, 62, 102, 214, 176, 206, 60, 9, 40, 27, 52, 30, 231, 93, 123, 21, 160, 247, 162, 44, 253, 114, 117, 199, 149, 197, 3, 89, 243, 156, 75, 200, 29, 180, 226, 71, 55, 22, 251, 249, 85, 142, 119, 127, 222, 94, 74, 99, 51, 146, 63, 41, 66, 131, 246, 166, 48, 91, 250, 96, 169, 174, 120, 8, 39, 76, 209, 205, 239, 252, 17, 157, 47, 161, 5, 90, 124, 145, 68, 113, 230, 10, 82, 139, 219, 19, 234, 184, 14, 140, 237, 182, 183, 198, 73, 238, 189, 194, 190, 202, 16, 181, 167, 133, 36, 186, 104, 64, 147, 35, 185, 109, 204, 163, 110, 34, 207, 87, 248, 100, 254, 26, 188, 242, 177, 79, 138, 134, 45, 18, 31, 211, 196, 179, 107, 171, 213, 173, 245, 168, 148, 77, 1, 233, 153, 170, 98, 49, 221, 136, 159, 116, 70, 37, 232, 129, 150, 210, 53, 97, 92, 6, 86, 122, 42, 217, 2, 187, 83, 58, 25, 126, 43, 195, 69, 128 } } end)(),\n  (function() return { c = \"PKOeG6LHjqgDniOTT0XWxb4MEuyW0MNMmz0GU6ZBEpkAcWaL4lvJ5Ffb/skA44FZ4uGFOJVEipCXslMdRIrW5elD2SBEpEnXqNue7bRZ0SJHN0cIu/RdtDRFOcxA200QyCECUWRWtngVI3oN1CaV/5hAGmNXyCUBkJ4ehEuPhKAUN5xLfNyW\", k = { { es = \"iB5xO471\", ek = 90, ln = 6, t = \"n\" }, { es = \"QLZKzDIW/vIA\", ek = 181, ln = 8 }, { es = \"iNSyBCAA\", ek = 16, ln = 4 }, { es = \"cVoM71qw\", ek = 107, ln = 6, t = \"n\" }, { es = \"wXyadu8f\", ek = 198, ln = 6, t = \"n\" }, { es = \"Qwlh9cGl\", ek = 33, ln = 6, t = \"n\" } }, nk = 6, sl = 4091761, u = {  }, nu = 0, np = 0, va = false, hc = 2432710679, hk = 3670013800, cs = 3781360, cn = 0, pm = { 76, 153, 11, 126, 199, 113, 99, 55, 139, 227, 112, 16, 108, 208, 155, 250, 182, 52, 252, 159, 103, 238, 220, 201, 167, 48, 35, 94, 79, 9, 225, 81, 97, 26, 146, 63, 100, 248, 144, 130, 75, 18, 115, 194, 254, 82, 33, 64, 19, 109, 160, 186, 150, 211, 14, 114, 161, 23, 53, 42, 171, 80, 175, 135, 197, 47, 222, 54, 234, 40, 72, 116, 3, 44, 176, 88, 101, 110, 39, 232, 67, 56, 111, 57, 1, 31, 166, 122, 102, 85, 13, 107, 198, 131, 202, 41, 5, 236, 93, 183, 152, 192, 145, 170, 156, 189, 219, 77, 206, 210, 127, 217, 179, 200, 218, 239, 95, 205, 86, 207, 196, 184, 228, 4, 213, 20, 129, 6, 89, 224, 38, 120, 245, 209, 165, 132, 138, 25, 162, 12, 28, 251, 221, 180, 117, 105, 66, 141, 204, 83, 62, 193, 169, 157, 128, 177, 149, 78, 65, 181, 140, 43, 214, 61, 164, 125, 106, 7, 91, 92, 253, 32, 8, 133, 36, 185, 172, 143, 158, 84, 188, 216, 68, 230, 123, 242, 142, 190, 241, 148, 121, 244, 215, 233, 223, 70, 74, 10, 37, 124, 17, 247, 178, 195, 58, 22, 87, 163, 147, 118, 49, 21, 191, 15, 2, 212, 226, 96, 136, 73, 50, 45, 24, 168, 71, 203, 246, 231, 235, 34, 137, 60, 229, 154, 187, 29, 69, 237, 174, 173, 240, 249, 98, 51, 59, 30, 151, 104, 46, 90, 134, 119, 243, 27 } } end)(),\n  (function() return { c = \"M/FM1fIFcwYRwZJRx6WEMWzKtcvEFLHSFk0S7H9Gw0mOuWbJRpwXOhiZpEoOzEKXNKNTRAbClgJFGtUbtizEz1uBjfOMaW3dNOSRT0hXX7XVcPtGF1aLaphDCbDPvU/NDLSALc/FyYOfkHoLxciLef5epLkFjUrfviTNnlGOlKaC2fKKNeOFj5uTw5CRJrVWz/fI1t3PRuQfuMKCBdgYqWKCosQfA22PUmrT4O+KaHrVBWxTM2PFcQQKE3bCm5HOhsQNiKtf4GmFCt6eyalL\", k = { { es = \"RvxS3fyX\", ek = 227, ln = 6, t = \"n\" }, { es = \"HF+tPFBvxlAt\", ek = 62, ln = 9 }, { es = \"y74XQIacbAAA\", ek = 153, ln = 7 }, { es = \"FbgusjBA\", ek = 244, ln = 5, t = \"n\" }, { es = \"7p61AIr4\", ek = 79, ln = 6, t = \"n\" }, { es = \"SWce/2OB\", ek = 170, ln = 6, t = \"n\" }, { es = \"3w3oe3Qv\", ek = 5, ln = 6, t = \"n\" }, { es = \"YpZww1K0\", ek = 96, ln = 6, t = \"n\" }, { es = \"KyDavy9c\", ek = 187, ln = 6, t = \"n\" } }, nk = 9, sl = 1017594, u = {  }, nu = 0, np = 2, va = false, hc = 842241942, hk = 1436854665, cs = 3781343, cn = 0, pm = { 78, 150, 108, 22, 185, 170, 160, 175, 179, 60, 101, 173, 75, 169, 73, 164, 198, 166, 47, 41, 154, 87, 35, 132, 59, 193, 243, 213, 174, 140, 121, 171, 230, 251, 66, 64, 65, 32, 29, 98, 124, 92, 7, 111, 200, 144, 168, 205, 254, 96, 91, 81, 178, 246, 147, 93, 8, 39, 212, 28, 229, 215, 214, 40, 223, 151, 31, 194, 172, 36, 138, 50, 46, 137, 67, 186, 241, 210, 238, 136, 77, 219, 83, 16, 56, 71, 104, 34, 119, 187, 114, 51, 57, 62, 82, 72, 177, 4, 152, 131, 225, 209, 122, 17, 5, 11, 58, 221, 125, 197, 37, 201, 191, 127, 89, 231, 182, 218, 24, 70, 153, 20, 21, 167, 115, 15, 44, 42, 68, 12, 139, 117, 181, 142, 155, 27, 159, 74, 14, 247, 195, 148, 94, 1, 69, 55, 48, 30, 252, 240, 228, 6, 120, 146, 2, 237, 227, 176, 222, 54, 95, 224, 156, 202, 236, 43, 188, 100, 3, 113, 248, 220, 135, 239, 13, 143, 216, 107, 130, 9, 26, 19, 10, 126, 23, 52, 129, 158, 245, 163, 192, 61, 234, 217, 199, 134, 53, 84, 183, 38, 118, 196, 110, 253, 25, 105, 208, 90, 206, 249, 235, 49, 106, 157, 226, 204, 133, 86, 161, 207, 45, 162, 79, 145, 76, 165, 102, 33, 88, 141, 103, 211, 232, 244, 128, 116, 189, 233, 109, 203, 18, 123, 112, 97, 250, 99, 242, 180, 85, 80, 190, 184, 63, 149 } } end)(),\n  (function() return { c = \"9Y5ZUbnZ1MBFxCrf67vVuVKFEQ/HHMTedE4HaY6EzpeVMwMZv/bQsNLbNXHZ6ajKm5gPHUoHrzQT8TZSpvuESAkKd26DKlbQ/SdQUH/DN1tKiY8EYgsSVjmTLjBI0n8P5nELWjsZh1VOAcXEbd0bq21dwMtbwHyOEvSfFJEJ1uSGlH9WrB6aeyTShS7Q5LIJK0TeQ+ESLjXKs+KW7keVqE/HVf/NRThHaMNUE0ZUfwGIaiAPtPaJAKnR/G2PGfvbiTNQ+OJBtQaJO4cBgbAX8zAAZ1fc29KM/wWP06CGN67P+yUN/AgQXF3IvaCEXe7ENESDnODVG5SaKe0StMyeoRhT0g8bP1BEBdiJ8+vGbMiGPF9RQvAZ8BlTfppBiI7C9csXMPIcs/FEC6KO3L1MdjkCoCuLtFWIrVQYaZmb7LfSkFicvnFasYJLNFaPGpKHrBeDmuQM/qrFNJCQyYXUXktD2wtMj0ofRm9FSNyfIb4M\", k = { { es = \"Sxpz4x60\", ek = 101, ln = 6, t = \"n\" }, { es = \"ynzYT2cd\", ek = 192, ln = 6, t = \"n\" }, { es = \"/xh1\", ek = 27, ln = 3 }, { es = \"Bk7bqgNhm4dn\", ek = 118, ln = 9 }, { es = \"j/yUNKDY\", ek = 209, ln = 6, t = \"n\" }, { es = \"YMk+iUlg\", ek = 44, ln = 6, t = \"n\" }, { es = \"xS+KY1YO\", ek = 135, ln = 6, t = \"n\" }, { es = \"W3RTzPiX\", ek = 226, ln = 6, t = \"n\" }, { es = \"LAL5Qc09\", ek = 61, ln = 6, t = \"n\" }, { es = \"vCNHPtPA\", ek = 152, ln = 5, t = \"n\" }, { es = \"FnAslTRQ\", ek = 243, ln = 6, t = \"n\" }, { es = \"8lK1EML5\", ek = 78, ln = 6, t = \"n\" }, { es = \"YGMD+2eG\", ek = 169, ln = 6, t = \"n\" }, { es = \"2sXrQDws\", ek = 4, ln = 6, t = \"n\" } }, nk = 14, sl = 5426044, u = {  }, nu = 0, np = 1, va = true, hc = 1862527499, hk = 3467158479, cs = 3781285, cn = 0, pm = { 175, 167, 127, 117, 80, 105, 75, 181, 57, 90, 33, 72, 83, 7, 55, 69, 163, 138, 3, 183, 220, 133, 32, 25, 45, 28, 50, 230, 144, 178, 30, 111, 93, 236, 189, 100, 246, 46, 195, 180, 190, 245, 20, 142, 172, 74, 19, 168, 49, 225, 88, 109, 207, 235, 248, 253, 186, 177, 247, 238, 12, 196, 122, 53, 92, 101, 204, 108, 47, 54, 187, 6, 164, 38, 170, 149, 169, 157, 192, 58, 131, 217, 146, 213, 140, 71, 252, 165, 73, 154, 119, 44, 13, 31, 197, 89, 137, 199, 126, 26, 150, 95, 141, 226, 166, 5, 99, 124, 135, 115, 77, 123, 179, 4, 148, 61, 234, 103, 39, 200, 22, 227, 155, 201, 18, 128, 159, 134, 8, 125, 218, 152, 130, 97, 214, 219, 237, 76, 21, 37, 188, 35, 112, 174, 34, 113, 223, 64, 222, 182, 110, 78, 66, 24, 249, 211, 60, 14, 52, 48, 136, 86, 254, 2, 1, 198, 147, 65, 215, 23, 102, 116, 243, 36, 161, 29, 40, 173, 239, 118, 9, 151, 233, 43, 158, 156, 87, 106, 162, 224, 240, 184, 251, 11, 229, 120, 121, 51, 94, 203, 202, 210, 59, 143, 241, 15, 82, 62, 70, 171, 85, 56, 244, 160, 67, 98, 104, 139, 209, 107, 242, 176, 96, 129, 206, 212, 84, 185, 153, 42, 216, 16, 194, 191, 145, 79, 231, 208, 114, 205, 68, 250, 10, 41, 91, 193, 17, 232, 132, 63, 221, 81, 228, 27 } } end)(),\n  (function() return { c = \"vHFRTsUJvF3U0F2TSzRGWOBM99MFWg5RSUxRnyJFbEJGNkuRqyvAAOuUemDJmM1Q/sHMNclaw3jc8L3DtohRiG7Bc+fGIUbJt1yfKPrJq5uGjOTXEgTbZ9oSX1ZdWEnbUXINSwFS3GkKpsNWb8XVq4+Hd+5NKhRHAfyMGesfxuSXvjtOVHDJ4xyW4I+XgUfMYcdUMx1PC/ie0trA2sRWihLfdYhbWOYLyTaOwF9EJX8OBgPM1q+cKvOByGqYkImDQu+BoLrTFmzYG9cR6mRdH9mcaBFM760KbKbJOu+boIRc2Y/PnuOXtTpRPlkfbW8ADFoVSrvdXNYZpEMI7mgKZzRAlpXJLS4FoEnCe+8WBi5QfH+ZCbdX3rYIy2jCrLuZz5dA1+DO9v7f\", k = { { es = \"ZwU9rQVh\", ek = 46, ln = 6, t = \"n\" }, { es = \"lHaeMM9d\", ek = 137, ln = 6 }, { es = \"cfRT9jiX\", ek = 228, ln = 6, t = \"n\" }, { es = \"KoL7REU8\", ek = 63, ln = 6, t = \"n\" }, { es = \"rOdBGh/F\", ek = 154, ln = 6, t = \"n\" }, { es = \"MrwugjhT\", ek = 245, ln = 6, t = \"n\" }, { es = \"h160AU74\", ek = 80, ln = 6, t = \"n\" }, { es = \"eSMc4muB\", ek = 171, ln = 6, t = \"n\" }, { es = \"1EGqZjgv\", ek = 6, ln = 6, t = \"n\" }, { es = \"SlZx0Rq3\", ek = 97, ln = 6, t = \"n\" }, { es = \"ICzaRicd\", ek = 188, ln = 6, t = \"n\" } }, nk = 11, sl = 5869125, u = {  }, nu = 0, np = 1, va = false, hc = 1207246967, hk = 569547357, cs = 3781292, cn = 0, pm = { 95, 56, 222, 182, 231, 163, 36, 229, 1, 181, 172, 156, 59, 246, 159, 45, 126, 71, 113, 83, 15, 230, 189, 14, 217, 198, 115, 187, 158, 108, 94, 209, 49, 251, 60, 104, 24, 5, 12, 119, 144, 245, 77, 239, 82, 145, 248, 125, 211, 154, 10, 180, 69, 73, 90, 175, 177, 162, 111, 225, 105, 44, 161, 219, 157, 4, 214, 9, 123, 202, 99, 43, 52, 120, 221, 220, 192, 20, 16, 188, 191, 250, 166, 149, 240, 233, 86, 207, 93, 91, 27, 135, 232, 48, 110, 121, 131, 31, 58, 200, 208, 117, 122, 97, 169, 146, 23, 137, 223, 118, 133, 178, 190, 78, 81, 194, 237, 35, 11, 116, 75, 242, 84, 92, 186, 57, 102, 18, 3, 29, 212, 197, 112, 88, 243, 215, 127, 252, 201, 206, 254, 107, 101, 85, 139, 55, 76, 249, 152, 164, 151, 203, 70, 37, 185, 2, 33, 128, 132, 140, 253, 236, 228, 129, 17, 28, 216, 204, 65, 155, 114, 34, 46, 196, 160, 234, 8, 26, 13, 167, 109, 238, 25, 136, 62, 227, 68, 218, 153, 106, 38, 30, 130, 74, 80, 124, 89, 96, 147, 179, 39, 100, 199, 171, 244, 54, 50, 150, 138, 53, 174, 184, 183, 22, 63, 72, 21, 193, 235, 41, 67, 40, 51, 148, 79, 47, 141, 32, 195, 87, 213, 173, 226, 170, 42, 103, 165, 143, 168, 205, 6, 64, 176, 98, 7, 142, 210, 66, 19, 134, 247, 61, 241, 224 } } end)()\n})\nreturn __vm56a42e62(...)\n";
 const turnstileEnabled = (env) => !!(env.TURNSTILE_SECRET_KEY && env.TURNSTILE_SITE_KEY);
 const isBrowserInitiated = (request, url) => isBrowserRequest(request)
   || request.headers.get('sec-fetch-site') === 'same-origin'
@@ -606,7 +687,7 @@ async function deleteProject(request, env, auth, id) {
   const orphanKeys = [];
   for (const script of scripts) {
     const { results: files = [] } = await env.DB.prepare('SELECT object_key FROM script_files WHERE script_id = ?').bind(script.id).all();
-    orphanKeys.push(...files.map((f) => f.object_key), script.object_key, script.raw_object_key);
+    orphanKeys.push(...files.map((f) => f.object_key), ...allBundleKeys(script.object_key), script.raw_object_key);
   }
   await env.DB.prepare('UPDATE api_keys SET project_id = NULL WHERE project_id = ?').bind(id).run();
   await env.DB.prepare('UPDATE license_users SET project_id = NULL WHERE project_id = ?').bind(id).run();
@@ -833,15 +914,18 @@ function scriptPage(request, row) {
 }
 
 async function serveRaw(request, env, kind, value) {
-  const row = await env.DB.prepare(`SELECT id, slug, name, object_key, sha256, mode, created_by FROM hosted_scripts WHERE ${kind === 'id' ? 'id' : 'slug'} = ?`).bind(value).first();
+  const row = await env.DB.prepare(`SELECT id, slug, name, object_key, sha256, mode, obfuscated, created_by FROM hosted_scripts WHERE ${kind === 'id' ? 'id' : 'slug'} = ?`).bind(value).first();
   if (isBrowserRequest(request)) {
     if (!row) return scriptPage(request, null);
     return deniedPage();
   }
   if (!row) return new Response('Script not found', { status: 404, headers: TEXT_HEADERS });
+  if (row.obfuscated !== 1) return new Response('Script protection pending. Save the script again.', { status: 503, headers: TEXT_HEADERS });
   if (row.mode === 'key') {
     await audit(env, request, null, 'script.raw.stub', row.id, 'ok');
-    return new Response(keyStub(row.slug, new URL(request.url).origin), { headers: { ...TEXT_HEADERS, 'content-disposition': contentDisposition(row.slug) } });
+    const loader = await env.BUCKET.get(bundleKeys(row.object_key).loader);
+    if (!loader) return new Response('Script protection pending. Save the script again.', { status: 503, headers: TEXT_HEADERS });
+    return new Response(loader.body, { headers: { ...TEXT_HEADERS, 'content-disposition': contentDisposition(row.slug) } });
   }
   const object = await env.BUCKET.get(row.object_key);
   if (!object) return new Response('Script content missing', { status: 404, headers: TEXT_HEADERS });
@@ -852,16 +936,35 @@ async function serveRaw(request, env, kind, value) {
 const DELIVERY_CHUNK_COUNT = 6;
 const DELIVERY_SESSION_SECONDS = 120;
 
-function splitScriptIntoChunks(code) {
-  const points = Array.from(code);
-  const chunks = [];
-  for (let i = 0; i < DELIVERY_CHUNK_COUNT; i++) {
-    const start = Math.floor(points.length * i / DELIVERY_CHUNK_COUNT);
-    const end = Math.floor(points.length * (i + 1) / DELIVERY_CHUNK_COUNT);
-    chunks.push(points.slice(start, end).join(''));
+// 조각 전송 순서 (0..5 의 무작위 순열). 세션마다 새로 뽑는다.
+function shuffledOrder() {
+  const order = Array.from({ length: DELIVERY_CHUNK_COUNT }, (_, i) => i);
+  const rnd = new Uint32Array(DELIVERY_CHUNK_COUNT);
+  crypto.getRandomValues(rnd);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = rnd[i] % (i + 1);
+    [order[i], order[j]] = [order[j], order[i]];
   }
-  return chunks;
+  return order;
 }
+function parseOrder(value) {
+  try {
+    const order = JSON.parse(value);
+    if (Array.isArray(order) && order.length === DELIVERY_CHUNK_COUNT && new Set(order).size === DELIVERY_CHUNK_COUNT) return order;
+  } catch {}
+  return Array.from({ length: DELIVERY_CHUNK_COUNT }, (_, i) => i);
+}
+// Fletcher 류 체크섬 (mod 65521, 바이트 단위). 로더의 fletcher 와 같은 식이다.
+function fletcher(value) {
+  let a = 1;
+  let b = 0;
+  for (const x of new TextEncoder().encode(value)) {
+    a = (a + x) % 65521;
+    b = (b + a) % 65521;
+  }
+  return b * 65521 + a;
+}
+
 
 async function startKeyDelivery(request, env, body) {
   if (!body || typeof body.slug !== 'string' || typeof body.key !== 'string' || body.key.length > 256) return fail(400, 'slug and key are required.');
@@ -869,6 +972,7 @@ async function startKeyDelivery(request, env, body) {
   const key = body.key.trim();
   const script = await env.DB.prepare('SELECT * FROM hosted_scripts WHERE slug = ?').bind(slug).first();
   if (!script || script.mode !== 'key' || script.status === 'DRAFT') return fail(404, 'Script not found.');
+  if (script.obfuscated !== 1) return fail(503, 'Script protection pending. Save the script again.');
   const hwid = typeof body.hwid === 'string' ? body.hwid.trim().slice(0, 128) : '';
   if (script.hwid_lock && !hwid) return fail(400, 'hwid is required for this script.');
   const keyHash = await sha256Hex(key);
@@ -926,13 +1030,24 @@ async function startKeyDelivery(request, env, body) {
       await env.DB.prepare(`UPDATE script_keys SET last_used_at = ${NOW_SQL} WHERE id = ?`).bind(row.id).run();
     }
   }
+  if (keyType !== 'decoy') {
+    // 같은 스크립트·같은 키로 토큰을 다시 요청하면, 직전 세션(완료된 것 포함)이 유효 시간 안에 있는 동안 차단한다.
+    const recent = await env.DB.prepare(
+      `SELECT id FROM script_delivery_sessions WHERE script_id = ? AND key_hash = ? AND created_at >= ? LIMIT 1`
+    ).bind(script.id, keyHash, new Date(Date.now() - DELIVERY_SESSION_SECONDS * 1000).toISOString()).first();
+    if (recent) {
+      await recordSecurityEvent(env, request, 'script.delivery.duplicate_token_request', 'blocked', script.id);
+      return fail(429, 'This script was just requested. Wait and try again.');
+    }
+  }
   const token = newSecret('tds_', 48);
   const expiresAt = new Date(Date.now() + DELIVERY_SESSION_SECONDS * 1000).toISOString();
   const sessionId = randomHex(16);
+  const order = shuffledOrder();
   await env.DB.prepare(
-    `INSERT INTO script_delivery_sessions (id, token_hash, script_id, key_type, key_id, key_hash, hwid, initial_ip, next_chunk, expires_at, decoy)
-     VALUES (?,?,?,?,?,?,?,?,0,?,?)`
-  ).bind(sessionId, await sha256Hex(token), script.id, keyType, keyId || null, keyHash, hwid || null, request.headers.get('cf-connecting-ip') || null, expiresAt, keyType === 'decoy' ? 1 : 0).run();
+    `INSERT INTO script_delivery_sessions (id, token_hash, script_id, key_type, key_id, key_hash, hwid, initial_ip, next_chunk, expires_at, decoy, chunk_order)
+     VALUES (?,?,?,?,?,?,?,?,0,?,?,?)`
+  ).bind(sessionId, await sha256Hex(token), script.id, keyType, keyId || null, keyHash, hwid || null, request.headers.get('cf-connecting-ip') || null, expiresAt, keyType === 'decoy' ? 1 : 0, JSON.stringify(order)).run();
   await env.DB.prepare(`DELETE FROM script_delivery_sessions WHERE expires_at <= ? OR (revoked_at IS NOT NULL AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 day'))`).bind(new Date().toISOString()).run();
   await recordSecurityEvent(env, request, 'script.delivery.session_created', 'ok', script.id);
   return json({ ok: true, token, chunks: DELIVERY_CHUNK_COUNT, expires_at: expiresAt });
@@ -962,7 +1077,7 @@ async function validateDeliverySession(env, session) {
 }
 
 async function deliverKeyChunk(request, env, body) {
-  if (!body || typeof body.token !== 'string' || body.token.length > 256 || !Number.isInteger(body.index)) return fail(400, 'token and chunk index are required.');
+  if (!body || typeof body.token !== 'string' || body.token.length > 256 || !Number.isInteger(body.seq)) return fail(400, 'token and seq are required.');
   const tokenHash = await sha256Hex(body.token);
   const session = await env.DB.prepare('SELECT * FROM script_delivery_sessions WHERE token_hash = ?').bind(tokenHash).first();
   if (!session) return fail(403, 'Delivery session is invalid.');
@@ -971,47 +1086,59 @@ async function deliverKeyChunk(request, env, body) {
     await recordSecurityEvent(env, request, 'script.delivery.expired_or_revoked', 'denied', session.script_id);
     return fail(403, 'Delivery session expired. Request a new loader.');
   }
-  if (body.index < 0 || body.index >= DELIVERY_CHUNK_COUNT || body.index !== session.next_chunk) {
+  const revokeWith = async (event) => {
     await env.DB.prepare('UPDATE script_delivery_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').bind(now, session.id).run();
-    await recordSecurityEvent(env, request, 'script.delivery.replay_or_order_violation', 'blocked', session.script_id);
+    await recordSecurityEvent(env, request, event, 'blocked', session.script_id);
+  };
+  if (body.seq < 0 || body.seq >= DELIVERY_CHUNK_COUNT || body.seq !== session.next_chunk) {
+    await revokeWith('script.delivery.replay_or_order_violation');
     return fail(409, 'Chunk order is invalid. Request a new loader.');
   }
   if (!(await validateDeliverySession(env, session))) {
-    await env.DB.prepare('UPDATE script_delivery_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').bind(now, session.id).run();
-    await recordSecurityEvent(env, request, 'script.delivery.key_revoked', 'blocked', session.script_id);
+    await revokeWith('script.delivery.key_revoked');
     return fail(403, 'License is no longer active.');
   }
-  let code = DECOY_CODE;
-  if (!session.decoy) {
+  const index = parseOrder(session.chunk_order)[body.seq];
+  let piece;
+  if (session.decoy) {
+    // 가짜 응답: 로드해도 아무 함수도 합치지 않는 같은 모양의 조각
+    piece = { chunk: DECOY_OBF, cf: fletcher(DECOY_OBF) };
+  } else {
     const script = await env.DB.prepare('SELECT object_key, served_sha256 FROM hosted_scripts WHERE id = ?').bind(session.script_id).first();
-    const object = script?.object_key ? await env.BUCKET.get(script.object_key) : null;
-    if (!object) return fail(404, 'Script content missing.');
-    code = await object.text();
-    const actualDigest = await sha256Hex(code);
-    if (script.served_sha256 && actualDigest !== script.served_sha256) {
-      await env.DB.prepare('UPDATE script_delivery_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').bind(now, session.id).run();
-      await recordSecurityEvent(env, request, 'script.delivery.integrity_failure', 'blocked', session.script_id);
+    if (!script?.object_key) return fail(404, 'Script content missing.');
+    const keys = bundleKeys(script.object_key);
+    const manifestObj = await env.BUCKET.get(keys.manifest);
+    if (!manifestObj) return fail(503, 'Script protection pending. Save the script again.');
+    let manifest = null;
+    try { manifest = JSON.parse(await manifestObj.text()); } catch { manifest = null; }
+    if (!manifest || !script.served_sha256 || manifest.full_sha !== script.served_sha256 || !manifest.parts?.[index]) {
+      await revokeWith('script.delivery.integrity_failure');
       return fail(500, 'Protected script integrity check failed.');
     }
-    if (!script.served_sha256) {
-      await env.DB.prepare('UPDATE hosted_scripts SET served_sha256 = ? WHERE id = ? AND served_sha256 IS NULL').bind(actualDigest, session.script_id).run();
+    // 조각마다 저장 때 기록한 sha256과 대조한다 (전송 중 변조 감지)
+    const partObj = await env.BUCKET.get(keys.parts[index]);
+    const chunk = partObj ? await partObj.text() : null;
+    if (chunk === null || await sha256Hex(chunk) !== manifest.parts[index].sha) {
+      await revokeWith('script.delivery.integrity_failure');
+      return fail(500, 'Protected script integrity check failed.');
     }
+    piece = { chunk, cf: manifest.parts[index].cf };
   }
-  const chunks = splitScriptIntoChunks(code);
-  const chunk = chunks[body.index];
   const updated = await env.DB.prepare(
     `UPDATE script_delivery_sessions
      SET next_chunk = next_chunk + 1, revoked_at = CASE WHEN next_chunk = ? THEN ? ELSE revoked_at END
      WHERE id = ? AND next_chunk = ? AND revoked_at IS NULL AND expires_at > ?`
-  ).bind(DELIVERY_CHUNK_COUNT - 1, now, session.id, body.index, now).run();
+  ).bind(DELIVERY_CHUNK_COUNT - 1, now, session.id, body.seq, now).run();
   if (!updated.meta || updated.meta.changes !== 1) {
     await env.DB.prepare('UPDATE script_delivery_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').bind(now, session.id).run();
     await recordSecurityEvent(env, request, 'script.delivery.replay_or_race', 'blocked', session.script_id);
     return fail(409, 'Chunk was already consumed. Request a new loader.');
   }
-  await recordSecurityEvent(env, request, 'script.delivery.chunk_sent', 'ok', `${session.script_id}:${body.index}`);
-  return json({ ok: true, index: body.index, total: DELIVERY_CHUNK_COUNT, chunk, sha256: await sha256Hex(chunk) });
+  await recordSecurityEvent(env, request, 'script.delivery.chunk_sent', 'ok', `${session.script_id}:${body.seq}`);
+  return json({ ok: true, index, total: DELIVERY_CHUNK_COUNT, chunk: piece.chunk, cf: piece.cf });
 }
+
+export { putDelivery, bundleKeys, scriptObjectKeys };
 
 async function execute(request, env, auth, body) {
   if (!body || (!body.id && !body.slug)) return fail(400, 'id or slug is required.');
@@ -1063,7 +1190,14 @@ class HttpError extends Error {
 
 async function obfuscateLua(env, code) {
   try {
-    return obfuscate(code);
+    return obfuscate(code, { antiTamper: false });
+  } catch (error) {
+    throw new HttpError(422, `난독화 실패: ${error.message}`);
+  }
+}
+async function obfuscateLuaBundle(env, code) {
+  try {
+    return obfuscateBundle(code, {});
   } catch (error) {
     throw new HttpError(422, `난독화 실패: ${error.message}`);
   }
@@ -1076,11 +1210,12 @@ async function putRaw(env, { scriptId, rawKey, rawCode, objectKey, digest }) {
   });
 }
 
-async function putObfuscated(env, { scriptId, rawKey, objectKey, served, digest, servedDigest }) {
+async function putObfuscated(env, { scriptId, rawKey, objectKey, served, bundle, digest, servedDigest, slug, origin }) {
   await env.BUCKET.put(objectKey, served, {
     ...OBJECT_META,
     customMetadata: { scriptId, sha256: digest, servedSha256: servedDigest, role: 'obfuscated', obfuscated: '1', pair: rawKey },
   });
+  await putDelivery(env, { objectKey, bundle, servedDigest, slug, origin });
 }
 
 async function createScript(request, env, auth, body) {
@@ -1110,18 +1245,19 @@ async function createScript(request, env, auth, body) {
   if (size > maxBytes(env)) return fail(413, `Script exceeds ${maxBytes(env)} bytes.`);
   const opts = scriptOptions(body, null);
   const id = randomHex(12);
-  const objectKey = `scripts/${id}.lua`;
-  const rawKey = `scripts/${id}.raw.lua`;
+  const { objectKey, rawKey } = await scriptObjectKeys(env, auth.user.id, id);
   const digest = await sha256Hex(body.code);
 
   await putRaw(env, { scriptId: id, rawKey, rawCode: body.code, objectKey, digest });
 
   let served;
   let servedDigest;
+  let bundle;
   try {
-    served = await obfuscateLua(env, body.code);
+    bundle = await obfuscateLuaBundle(env, body.code);
+    served = bundle.code;
     if (byteLength(served) > maxBytes(env)) throw new HttpError(413, `Obfuscated script exceeds ${maxBytes(env)} bytes.`);
-    servedDigest = await sha256Hex(served);
+    servedDigest = await bundleDigest(bundle);
     await audit(env, request, auth, 'script.obfuscate', id, 'ok');
   } catch (error) {
     await audit(env, request, auth, 'script.obfuscate', id, 'failed');
@@ -1131,9 +1267,10 @@ async function createScript(request, env, auth, body) {
   }
 
   try {
-    await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, digest, servedDigest });
+    await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, bundle, digest, servedDigest, slug, origin: new URL(request.url).origin });
   } catch (error) {
-    await purgeObjects(env, [rawKey, objectKey]);
+    await purgeObjects(env, [rawKey, ...allBundleKeys(objectKey)]);
+    if (error instanceof HttpError) return fail(error.status, error.message);
     throw error;
   }
 
@@ -1184,17 +1321,18 @@ async function updateScript(request, env, auth, id, body) {
   let obfuscated = current.obfuscated;
   if (newCode !== null) {
     const suffix = randomHex(6);
-    objectKey = `scripts/${id}-${suffix}.lua`;
-    rawKey = `scripts/${id}-${suffix}.raw.lua`;
+    ({ objectKey, rawKey } = await scriptObjectKeys(env, current.created_by, id, suffix));
     obfuscated = 1;
 
     await putRaw(env, { scriptId: id, rawKey, rawCode: newCode, objectKey, digest });
 
     let served;
+    let bundle;
     try {
-      served = await obfuscateLua(env, newCode);
+      bundle = await obfuscateLuaBundle(env, newCode);
+      served = bundle.code;
       if (byteLength(served) > maxBytes(env)) throw new HttpError(413, `Obfuscated script exceeds ${maxBytes(env)} bytes.`);
-      servedDigest = await sha256Hex(served);
+      servedDigest = await bundleDigest(bundle);
       await audit(env, request, auth, 'script.obfuscate', id, 'ok');
     } catch (error) {
       await audit(env, request, auth, 'script.obfuscate', id, 'failed');
@@ -1204,9 +1342,10 @@ async function updateScript(request, env, auth, id, body) {
     }
 
     try {
-      await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, digest, servedDigest });
+      await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, bundle, digest, servedDigest, slug, origin: new URL(request.url).origin });
     } catch (error) {
-      await purgeObjects(env, [rawKey, objectKey]);
+      await purgeObjects(env, [rawKey, ...allBundleKeys(objectKey)]);
+      if (error instanceof HttpError) return fail(error.status, error.message);
       throw error;
     }
   }
@@ -1217,10 +1356,12 @@ async function updateScript(request, env, auth, id, body) {
       `UPDATE hosted_scripts SET object_key = ?, raw_object_key = ?, obfuscated = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, served_sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
     ).bind(objectKey, rawKey, obfuscated, slug, name, size, digest, servedDigest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
   } catch (error) {
-    if (objectKey !== oldObjectKey) await purgeObjects(env, [objectKey, rawKey]);
+    if (objectKey !== oldObjectKey) await purgeObjects(env, [...allBundleKeys(objectKey), rawKey]);
     throw error;
   }
-  if (objectKey !== oldObjectKey) await purgeObjects(env, [oldObjectKey, oldRawKey].filter(Boolean));
+  if (objectKey !== oldObjectKey) await purgeObjects(env, [...allBundleKeys(oldObjectKey), oldRawKey].filter(Boolean));
+  // 코드는 그대로인데 URL 이름만 바뀌면 로더 안의 slug 만 갱신한다
+  if (newCode === null && slug !== current.slug) await putLoader(env, objectKey, slug, new URL(request.url).origin);
   await audit(env, request, auth, 'script.update', id, 'ok');
   return json({ ok: true, script: scriptView(await getScriptRow(env, id)), raw_url: publicUrl(new URL(request.url).origin, slug) });
 }
@@ -1242,7 +1383,7 @@ async function deleteScript(request, env, auth, id) {
   await env.DB.prepare('DELETE FROM script_files WHERE script_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM script_keys WHERE script_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM hosted_scripts WHERE id = ?').bind(id).run();
-  await purgeObjects(env, [...files.map((f) => f.object_key), current.object_key, current.raw_object_key].filter(Boolean));
+  await purgeObjects(env, [...files.map((f) => f.object_key), ...allBundleKeys(current.object_key), current.raw_object_key].filter(Boolean));
   await audit(env, request, auth, 'script.delete', id, 'ok');
   return json({ ok: true, id });
 }
