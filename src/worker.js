@@ -17,6 +17,12 @@ const BATCH_LIMIT = 300;
 const PROJECT_NAME_MAX = 60;
 const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, obfuscated, status, version, project_id, byte_size, sha256, created_at, updated_at, created_by';
 
+const CORS_HEADERS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type' };
+const withCors = (response) => {
+  const headers = new Headers(response.headers);
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => headers.set(k, v));
+  return new Response(response.body, { status: response.status, headers });
+};
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 const fail = (status, error) => json({ ok: false, error }, status);
 const plain = (body, status) => new Response(body, { status, headers: TEXT_HEADERS });
@@ -136,14 +142,15 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
+    if (method === 'OPTIONS' && path.startsWith('/api/')) return new Response(null, { status: 204, headers: { ...CORS_HEADERS, allow: 'GET,POST,PATCH,DELETE,OPTIONS' } });
     if (method === 'OPTIONS') return new Response(null, { status: 204, headers: { allow: 'GET,POST,PATCH,DELETE,OPTIONS' } });
     try {
       const ip = request.headers.get('cf-connecting-ip');
-      if (ip && (await env.DB.prepare('SELECT ip FROM banned_ips WHERE ip = ?').bind(ip).first())) return fail(403, 'Access denied.');
+      if (ip && (await env.DB.prepare('SELECT ip FROM banned_ips WHERE ip = ?').bind(ip).first())) { const denied = fail(403, 'Access denied.'); return path.startsWith('/api/') ? withCors(denied) : denied; }
       if (path === '/api/health' && method === 'GET') return health(env);
       if (path === '/api/auth/signup' && method === 'POST') return signup(request, env, await readBody(request));
       if (path === '/api/key-run' && method === 'POST') return keyRun(request, env, await readBody(request));
-      if (path.startsWith('/api/')) return await handleApi(request, env, url);
+      if (path.startsWith('/api/')) return withCors(await handleApi(request, env, url));
       if (path === '/admin' || path === '/admin/') {
         return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/admin', url), request)) : plain('Not found', 404);
       }
@@ -154,7 +161,8 @@ export default {
       return env.ASSETS ? env.ASSETS.fetch(request) : plain('Not found', 404);
     } catch (error) {
       console.error('Worker request failed:', error);
-      return json({ ok: false, error: 'Internal server error.' }, 500);
+      const failed = json({ ok: false, error: 'Internal server error.' }, 500);
+      return path.startsWith('/api/') ? withCors(failed) : failed;
     }
   }
 };
