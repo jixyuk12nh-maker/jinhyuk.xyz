@@ -1,4 +1,5 @@
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
+import { obfuscate } from './obfuscator.js';
 const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 const OBJECT_META = { httpMetadata: { contentType: 'text/plain; charset=utf-8', cacheControl: 'no-store' } };
 const ROLES = ['owner', 'admin', 'user'];
@@ -14,7 +15,7 @@ const USER_LIMIT = 10000;
 const MAX_FILES = 10;
 const BATCH_LIMIT = 300;
 const PROJECT_NAME_MAX = 60;
-const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, status, version, project_id, byte_size, sha256, created_at, updated_at, created_by';
+const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, obfuscated, status, version, project_id, byte_size, sha256, created_at, updated_at, created_by';
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 const fail = (status, error) => json({ ok: false, error }, status);
@@ -22,7 +23,6 @@ const plain = (body, status) => new Response(body, { status, headers: TEXT_HEADE
 const toHex = (buffer) => [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
 const sha256Hex = async (value) => toHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
 const randomHex = (bytes = 12) => toHex(crypto.getRandomValues(new Uint8Array(bytes)));
-// 대소문자 영문 + 숫자 중에서 균등하게 뽑는다 (256을 62로 나눈 나머지 편향을 피하려고 248 미만만 사용).
 const randomAlnum = (length) => {
   let out = '';
   while (out.length < length) {
@@ -87,7 +87,6 @@ const readBody = (request) => request.json().catch(() => null);
 const isExpired = (iso) => !!iso && Date.parse(iso) <= Date.now();
 const isBrowserNavigation = (request) =>
   request.headers.get('sec-fetch-mode') === 'navigate' || request.headers.get('sec-fetch-dest') === 'document';
-// 구형 모바일 브라우저는 sec-fetch 헤더를 보내지 않으므로 Accept의 text/html도 브라우저로 본다.
 const isBrowserRequest = (request) =>
   isBrowserNavigation(request) || (request.headers.get('accept') || '').includes('text/html');
 const expiresFromDays = (value) => {
@@ -227,7 +226,10 @@ async function handleApi(request, env, url) {
     return json({ ok: true, projects: await listProjects(env) });
   }
   if (path === '/api/projects' && method === 'POST') {
-    if (!manager) return forbidden();
+    if (!manager) {
+      await audit(env, request, auth, `${method} ${path}`, null, 'forbidden');
+      return fail(403, '프로젝트는 소유자와 관리자만 만들 수 있습니다.');
+    }
     return createProject(request, env, auth, await readBody(request));
   }
   const projectMatch = path.match(/^\/api\/projects\/([A-Za-z0-9_-]{8,40})$/);
@@ -370,7 +372,7 @@ async function dashboard(env) {
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
   const obf = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM api_audit_logs WHERE action IN ('script.create','script.update') AND status = 'ok' AND created_at >= ?"
+    "SELECT COUNT(*) AS n FROM api_audit_logs WHERE action = 'script.obfuscate' AND created_at >= ?"
   ).bind(monthStart).first();
   return json({
     ok: true,
@@ -423,17 +425,16 @@ async function renameProject(request, env, auth, id, body) {
 async function deleteProject(request, env, auth, id) {
   const current = await env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(id).first();
   if (!current) return fail(404, 'Project not found.');
-  const { results: scripts = [] } = await env.DB.prepare('SELECT id, object_key FROM hosted_scripts WHERE project_id = ?').bind(id).all();
+  const { results: scripts = [] } = await env.DB.prepare('SELECT id, object_key, raw_object_key FROM hosted_scripts WHERE project_id = ?').bind(id).all();
   const orphanKeys = [];
   for (const script of scripts) {
     const { results: files = [] } = await env.DB.prepare('SELECT object_key FROM script_files WHERE script_id = ?').bind(script.id).all();
-    orphanKeys.push(...files.map((f) => f.object_key), script.object_key);
+    orphanKeys.push(...files.map((f) => f.object_key), script.object_key, script.raw_object_key);
   }
-  // API 키는 삭제하지 않고 프로젝트 연결만 끊는다. (FK ON DELETE CASCADE로 키가 사라지는 것을 막음)
   await env.DB.prepare('UPDATE api_keys SET project_id = NULL WHERE project_id = ?').bind(id).run();
   await env.DB.prepare('UPDATE license_users SET project_id = NULL WHERE project_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(id).run();
-  await purgeObjects(env, orphanKeys);
+  await purgeObjects(env, orphanKeys.filter(Boolean));
   await audit(env, request, auth, 'project.delete', id, 'ok');
   return json({ ok: true, id });
 }
@@ -616,7 +617,6 @@ function deniedPage() {
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// 브라우저로 스크립트 주소를 열었을 때 원문 대신 보여주는 페이지. 코드는 포함하지 않는다.
 function scriptPage(request, row) {
   const page = (status, title, inner) => new Response(`<!doctype html>
 <html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>${esc(title)}</title><link rel="stylesheet" href="/style.css"></head>
@@ -739,7 +739,7 @@ async function execute(request, env, auth, body) {
     : await env.DB.prepare('SELECT * FROM hosted_scripts WHERE slug = ?').bind(normalizeSlug(body.slug)).first();
   if (!script) return fail(404, 'Script not found.');
   if (!canViewSource(auth.user, script)) return fail(403, '원문은 작성자와 소유자만 볼 수 있습니다.');
-  const object = await env.BUCKET.get(script.object_key);
+  const object = await env.BUCKET.get(script.raw_object_key || script.object_key);
   if (!object) return fail(404, 'Script content missing.');
   const code = await object.text();
   await audit(env, request, auth, 'script.execute', script.id, 'ok');
@@ -750,7 +750,6 @@ async function uniqueSlug(env, name) {
   const root = (safeSlug(name) || `script-${randomHex(3)}`).replace(/\.lua$/, '');
   for (let i = 0; i < 50; i += 1) {
     const suffix = i === 0 ? '' : `-${i + 1}`;
-    // 접미사를 붙여도 SLUG_RE(최대 56자) 안에 들어가도록 이름 부분을 줄인다.
     const candidate = root.slice(0, 56 - suffix.length) + suffix;
     if (RESERVED.includes(candidate)) continue;
     if (!(await env.DB.prepare('SELECT id FROM hosted_scripts WHERE slug = ?').bind(candidate).first())) return candidate;
@@ -772,6 +771,35 @@ function scriptOptions(body, current) {
     lightweight: boolInt(body.lightweight, current?.lightweight ?? 0),
     secure: boolInt(body.secure_loader, current?.secure_loader ?? 1)
   };
+}
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function obfuscateLua(env, code) {
+  try {
+    return obfuscate(code);
+  } catch (error) {
+    throw new HttpError(422, `난독화 실패: ${error.message}`);
+  }
+}
+
+async function putRaw(env, { scriptId, rawKey, rawCode, objectKey, digest }) {
+  await env.BUCKET.put(rawKey, rawCode, {
+    ...OBJECT_META,
+    customMetadata: { scriptId, sha256: digest, role: 'raw', pair: objectKey },
+  });
+}
+
+async function putObfuscated(env, { scriptId, rawKey, objectKey, served, digest }) {
+  await env.BUCKET.put(objectKey, served, {
+    ...OBJECT_META,
+    customMetadata: { scriptId, sha256: digest, role: 'obfuscated', obfuscated: '1', pair: rawKey },
+  });
 }
 
 async function createScript(request, env, auth, body) {
@@ -802,15 +830,37 @@ async function createScript(request, env, auth, body) {
   const opts = scriptOptions(body, null);
   const id = randomHex(12);
   const objectKey = `scripts/${id}.lua`;
+  const rawKey = `scripts/${id}.raw.lua`;
   const digest = await sha256Hex(body.code);
-  await env.BUCKET.put(objectKey, body.code, { ...OBJECT_META, customMetadata: { scriptId: id, sha256: digest } });
+
+  await putRaw(env, { scriptId: id, rawKey, rawCode: body.code, objectKey, digest });
+
+  let served;
+  try {
+    served = await obfuscateLua(env, body.code);
+    if (byteLength(served) > maxBytes(env)) throw new HttpError(413, `Obfuscated script exceeds ${maxBytes(env)} bytes.`);
+    await audit(env, request, auth, 'script.obfuscate', id, 'ok');
+  } catch (error) {
+    await audit(env, request, auth, 'script.obfuscate', id, 'failed');
+    await purgeObjects(env, [rawKey]);
+    if (error instanceof HttpError) return fail(error.status, error.message);
+    throw error;
+  }
+
+  try {
+    await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, digest });
+  } catch (error) {
+    await purgeObjects(env, [rawKey, objectKey]);
+    throw error;
+  }
+
   try {
     await env.DB.prepare(
-      `INSERT INTO hosted_scripts (id, slug, name, object_key, byte_size, sha256, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, project_id, status, version, created_by)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','v0.0.0.1',?)`
-    ).bind(id, slug, name, objectKey, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, projectId, auth.user.id).run();
+      `INSERT INTO hosted_scripts (id, slug, name, object_key, raw_object_key, obfuscated, byte_size, sha256, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, project_id, status, version, created_by)
+       VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,'ACTIVE','v0.0.0.1',?)`
+    ).bind(id, slug, name, objectKey, rawKey, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, projectId, auth.user.id).run();
   } catch (error) {
-    await env.BUCKET.delete(objectKey);
+    await purgeObjects(env, [objectKey, rawKey]);
     throw error;
   }
   await audit(env, request, auth, 'script.create', id, 'ok');
@@ -844,22 +894,48 @@ async function updateScript(request, env, auth, id, body) {
     || opts.hwid !== current.hwid_lock || opts.silent !== current.silent || opts.heartbeat !== current.heartbeat
     || opts.lightweight !== current.lightweight || opts.secure !== current.secure_loader || digest !== current.sha256;
   const oldObjectKey = current.object_key;
+  const oldRawKey = current.raw_object_key;
   let objectKey = oldObjectKey;
+  let rawKey = oldRawKey;
+  let obfuscated = current.obfuscated;
   if (newCode !== null) {
-    objectKey = `scripts/${id}-${randomHex(6)}.lua`;
-    await env.BUCKET.put(objectKey, newCode, { ...OBJECT_META, customMetadata: { scriptId: id, sha256: digest } });
+    const suffix = randomHex(6);
+    objectKey = `scripts/${id}-${suffix}.lua`;
+    rawKey = `scripts/${id}-${suffix}.raw.lua`;
+    obfuscated = 1;
+
+    await putRaw(env, { scriptId: id, rawKey, rawCode: newCode, objectKey, digest });
+
+    let served;
+    try {
+      served = await obfuscateLua(env, newCode);
+      if (byteLength(served) > maxBytes(env)) throw new HttpError(413, `Obfuscated script exceeds ${maxBytes(env)} bytes.`);
+      await audit(env, request, auth, 'script.obfuscate', id, 'ok');
+    } catch (error) {
+      await audit(env, request, auth, 'script.obfuscate', id, 'failed');
+      await purgeObjects(env, [rawKey]);
+      if (error instanceof HttpError) return fail(error.status, error.message);
+      throw error;
+    }
+
+    try {
+      await putObfuscated(env, { scriptId: id, rawKey, objectKey, served, digest });
+    } catch (error) {
+      await purgeObjects(env, [rawKey, objectKey]);
+      throw error;
+    }
   }
   const version = changed ? bumpVersion(current.version) : current.version;
   const status = changed || current.status !== 'ACTIVE' ? 'ACTIVE' : current.status;
   try {
     await env.DB.prepare(
-      `UPDATE hosted_scripts SET object_key = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
-    ).bind(objectKey, slug, name, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
+      `UPDATE hosted_scripts SET object_key = ?, raw_object_key = ?, obfuscated = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
+    ).bind(objectKey, rawKey, obfuscated, slug, name, size, digest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
   } catch (error) {
-    if (objectKey !== oldObjectKey) await purgeObjects(env, [objectKey]);
+    if (objectKey !== oldObjectKey) await purgeObjects(env, [objectKey, rawKey]);
     throw error;
   }
-  if (objectKey !== oldObjectKey) await purgeObjects(env, [oldObjectKey]);
+  if (objectKey !== oldObjectKey) await purgeObjects(env, [oldObjectKey, oldRawKey].filter(Boolean));
   await audit(env, request, auth, 'script.update', id, 'ok');
   return json({ ok: true, script: scriptView(await getScriptRow(env, id)), raw_url: publicUrl(new URL(request.url).origin, slug) });
 }
@@ -875,13 +951,13 @@ async function purgeObjects(env, keys) {
 }
 
 async function deleteScript(request, env, auth, id) {
-  const current = await env.DB.prepare('SELECT object_key FROM hosted_scripts WHERE id = ?').bind(id).first();
+  const current = await env.DB.prepare('SELECT object_key, raw_object_key FROM hosted_scripts WHERE id = ?').bind(id).first();
   if (!current) return fail(404, 'Script not found.');
   const { results: files = [] } = await env.DB.prepare('SELECT object_key FROM script_files WHERE script_id = ?').bind(id).all();
   await env.DB.prepare('DELETE FROM script_files WHERE script_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM script_keys WHERE script_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM hosted_scripts WHERE id = ?').bind(id).run();
-  await purgeObjects(env, [...files.map((f) => f.object_key), current.object_key]);
+  await purgeObjects(env, [...files.map((f) => f.object_key), current.object_key, current.raw_object_key].filter(Boolean));
   await audit(env, request, auth, 'script.delete', id, 'ok');
   return json({ ok: true, id });
 }
@@ -991,7 +1067,6 @@ async function issueKey(request, env, auth, body) {
   const role = body.role === undefined ? 'user' : String(body.role);
   if (!ROLES.includes(role)) return fail(400, 'Invalid role.');
 
-  // 모든 입력을 먼저 검사한 뒤에만 DB에 쓴다. (검사 실패 시 사용자 행이 남지 않도록)
   const expiry = expiresFromDays(body.expires_in_days);
   if (!expiry.ok) return fail(400, 'expires_in_days must be between 1 and 3650.');
   const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 60) : null;
