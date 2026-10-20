@@ -1,7 +1,5 @@
--- 스크립트 작성자 기록 (브라우저 열람·원문 조회 권한 판단에 사용). 기존 스크립트는 NULL이며 소유자만 열람 가능.
 ALTER TABLE hosted_scripts ADD COLUMN created_by TEXT;
 
--- 라이선스 사용자는 프로젝트 삭제 후에도 남도록 project_id를 FK 없이 NULL 허용으로 재생성한다.
 CREATE TABLE license_users_new (
   id TEXT PRIMARY KEY,
   project_id TEXT,
