@@ -144,18 +144,3 @@ npm test
 Key-protected scripts now use a six-chunk delivery flow. The Worker creates a 120-second session, stores only a hash of the session token, serves one chunk per ordered request, rechecks the license/key before each chunk, and rejects replay/out-of-order requests. The legacy `/api/key-run` endpoint is disabled so it cannot return the full script in one response. Apply migrations `0017_script_delivery_sessions.sql` and `0018_served_script_integrity.sql` before deploying this version.
 
 This raises extraction difficulty but is not DRM: a client that receives and executes Lua code can still dump or reconstruct it. Use server-side logic for sensitive decisions and rotate/revoke exposed keys.
-
-## Automatic deployment with GitHub Actions
-
-This repository uses `wrangler.jsonc` as its only Wrangler configuration file. `wrangler.toml` has been removed to avoid configuration ambiguity.
-
-To enable automatic deployment, add these GitHub repository Actions secrets under **Settings → Secrets and variables → Actions**:
-
-- `CLOUDFLARE_API_TOKEN`: a Cloudflare API token permitted to deploy Workers and manage the configured resources as required by Wrangler.
-- `CLOUDFLARE_ACCOUNT_ID`: your Cloudflare account ID.
-
-The workflow `.github/workflows/deploy.yml` deploys automatically when a commit is pushed to the `main` branch, and can also be started manually from the GitHub Actions tab. It runs the JavaScript syntax checks before deployment.
-
-Keep `TURNSTILE_SECRET_KEY` in the Cloudflare Worker `tm` **Settings → Variables and Secrets** as a Secret. Never commit the secret value to this repository. The public `TURNSTILE_SITE_KEY` may remain in `wrangler.jsonc`.
-
-If Cloudflare Workers Builds is also configured to deploy on pushes, disable one of the two deployment methods to avoid duplicate deployments. This workflow deploys code; it does not automatically apply production D1 migrations.
