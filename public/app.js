@@ -576,7 +576,8 @@
       ]);
       if (editScriptId !== id) return;
       $('scriptCode').value = code.code;
-      pending = (files.files || []).map((f) => ({ id: f.id, name: f.name, size: f.byte_size, file: null }));
+      const added = pending.filter((f) => !f.id);
+      pending = [...(files.files || []).map((f) => ({ id: f.id, name: f.name, size: f.byte_size, file: null })), ...added];
       renderFiles();
     } catch (error) {
       banner('scriptBanner', error.message, 'error');
