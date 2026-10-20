@@ -137,6 +137,114 @@ async function audit(env, request, auth, action, target, status) {
   }
 }
 
+const TURNSTILE_CLEARANCE_SECONDS = 1800;
+const DECOY_CODE = 'local function _safe_result() return nil end\nreturn _safe_result()';
+const turnstileEnabled = (env) => !!(env.TURNSTILE_SECRET_KEY && env.TURNSTILE_SITE_KEY);
+const isBrowserInitiated = (request, url) => isBrowserRequest(request)
+  || request.headers.get('sec-fetch-site') === 'same-origin'
+  || request.headers.get('origin') === url.origin;
+
+async function hmacHex(secret, value) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret + ':jinhyuk-turnstile-clearance'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return toHex(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value)));
+}
+
+async function hasTurnstileClearance(request, env) {
+  const cookie = request.headers.get('cookie') || '';
+  const match = cookie.match(/(?:^|;\s*)jxy_clearance=([0-9]{10})\.([a-f0-9]{64})/);
+  if (!match || Number(match[1]) <= Math.floor(Date.now() / 1000)) return false;
+  const expected = await hmacHex(env.TURNSTILE_SECRET_KEY, match[1]);
+  if (expected.length !== match[2].length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ match[2].charCodeAt(i);
+  return diff === 0;
+}
+
+async function verifyTurnstile(request, env, body) {
+  if (!turnstileEnabled(env)) return fail(503, 'Bot verification is not configured.');
+  const token = typeof body?.token === 'string' ? body.token : '';
+  if (!token || token.length > 4096) return fail(400, 'Complete the bot verification first.');
+  const form = new URLSearchParams({ secret: env.TURNSTILE_SECRET_KEY, response: token });
+  const ip = request.headers.get('cf-connecting-ip');
+  if (ip) form.set('remoteip', ip);
+  let result;
+  try {
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form
+    });
+    result = await response.json();
+  } catch {
+    return fail(502, 'Bot verification service is temporarily unavailable.');
+  }
+  const expectedHost = String(env.TURNSTILE_HOSTNAME || new URL(request.url).hostname).toLowerCase();
+  if (!result?.success || String(result.hostname || '').toLowerCase() !== expectedHost) {
+    await recordSecurityEvent(env, request, 'turnstile.failed', 'denied');
+    return fail(403, 'Bot verification failed. Please try again.');
+  }
+  const expiry = String(Math.floor(Date.now() / 1000) + TURNSTILE_CLEARANCE_SECONDS);
+  const signature = await hmacHex(env.TURNSTILE_SECRET_KEY, expiry);
+  return new Response(JSON.stringify({ ok: true }), { status: 200, headers: {
+    ...JSON_HEADERS,
+    'set-cookie': `jxy_clearance=${expiry}.${signature}; Max-Age=${TURNSTILE_CLEARANCE_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Strict`
+  }});
+}
+
+async function recordSecurityEvent(env, request, action, status, target = null) {
+  try {
+    await env.DB.prepare('INSERT INTO security_events (ip, action, target, status) VALUES (?,?,?,?)')
+      .bind(request.headers.get('cf-connecting-ip') || null, action, target, status).run();
+  } catch (error) {
+    console.error('Security event write failed:', error);
+  }
+}
+
+function turnstileGatePage(request, env) {
+  const url = new URL(request.url);
+  const requested = url.searchParams.get('next') || (url.pathname + url.search);
+  const next = requested.startsWith('/') && !requested.startsWith('//') && !requested.startsWith('/\\') ? requested : '/';
+  const siteKey = String(env.TURNSTILE_SITE_KEY || '').replace(/[&<>"']/g, '');
+  const safeNext = JSON.stringify(next).replace(/</g, '\\u003c');
+  return new Response(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>보안 확인 · jinhyuk.xyz</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111318;color:#f5f6fa;font:16px system-ui,sans-serif}.card{width:min(92vw,420px);box-sizing:border-box;padding:28px;border:1px solid #ffffff28;border-radius:20px;background:#ffffff0b;box-shadow:0 20px 70px #0008;text-align:center}.muted{color:#aeb4c2;font-size:14px;line-height:1.6}.widget{display:flex;justify-content:center;margin:24px 0}#error{color:#ff8e8e;font-size:13px}</style><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></head><body><main class="card"><h1>보안 확인</h1><p class="muted">자동화된 접근을 방지하기 위해 브라우저 확인이 필요합니다.</p><div class="widget"><div class="cf-turnstile" data-sitekey="${siteKey}" data-callback="verified" data-error-callback="failed" data-expired-callback="expired" data-theme="dark"></div></div><p id="error" role="status"></p><p class="muted">확인이 완료되면 요청한 페이지로 이동합니다.</p></main><script>const next=${safeNext};async function verified(token){const e=document.getElementById('error');e.textContent='확인 중...';try{const r=await fetch('/api/security/turnstile-verify',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'확인에 실패했습니다.');location.replace(next)}catch(err){e.textContent=err.message||'다시 시도해 주세요.';if(window.turnstile)turnstile.reset()}}function failed(){document.getElementById('error').textContent='인증을 불러오지 못했습니다. 페이지를 새로고침해 주세요.'}function expired(){document.getElementById('error').textContent='인증이 만료되었습니다. 다시 확인해 주세요.'}</script></body></html>`, { status: 200, headers: HTML_HEADERS });
+}
+
+async function autoBanIp(env, request, reason, target = null) {
+  const ip = request.headers.get('cf-connecting-ip') || '';
+  if (!ip) return false;
+  const expires = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+  await env.DB.prepare(`INSERT INTO banned_ips (ip, reason, expires_at, auto_ban) VALUES (?, ?, ?, 1) ON CONFLICT(ip) DO UPDATE SET reason = excluded.reason, expires_at = excluded.expires_at, auto_ban = 1, created_at = ${NOW_SQL}`)
+    .bind(ip, reason, expires).run();
+  await recordSecurityEvent(env, request, 'ip.auto_ban', 'blocked', target);
+  return true;
+}
+
+async function recordInvalidApiAuth(env, request, path, method) {
+  const ip = request.headers.get('cf-connecting-ip') || '';
+  if (!ip) return false;
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM api_audit_logs WHERE ip = ? AND user_id IS NULL AND status = 'denied' AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 minutes')`
+  ).bind(ip).first();
+  const count = Number(row?.n || 0);
+  await recordSecurityEvent(env, request, 'api.auth.failed', 'denied', `${method} ${path}`);
+  if (count >= 8) return autoBanIp(env, request, 'Repeated unauthorized API requests', `${method} ${path}`);
+  return false;
+}
+
+async function recordInvalidScriptKey(env, request, scriptId) {
+  const ip = request.headers.get('cf-connecting-ip') || '';
+  await recordSecurityEvent(env, request, 'script.key.invalid', 'denied', scriptId);
+  await audit(env, request, null, 'script.key_run', scriptId, 'denied');
+  if (!ip) return { decoy: false, banned: false };
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM api_audit_logs WHERE ip = ? AND action = 'script.key_run' AND status = 'denied' AND target = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 minutes')`
+  ).bind(ip, scriptId).first();
+  const count = Number(row?.n || 0);
+  if (count >= 8) {
+    await autoBanIp(env, request, 'Repeated invalid script-key attempts', scriptId);
+    return { decoy: false, banned: true };
+  }
+  return { decoy: count >= 6, banned: false };
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -146,9 +254,30 @@ export default {
     if (method === 'OPTIONS') return new Response(null, { status: 204, headers: { allow: 'GET,POST,PATCH,DELETE,OPTIONS' } });
     try {
       const ip = request.headers.get('cf-connecting-ip');
-      if (ip && (await env.DB.prepare('SELECT ip FROM banned_ips WHERE ip = ?').bind(ip).first())) { const denied = fail(403, 'Access denied.'); return path.startsWith('/api/') ? withCors(denied) : denied; }
+      if (ip) {
+        const ban = await env.DB.prepare('SELECT ip, expires_at FROM banned_ips WHERE ip = ?').bind(ip).first();
+        if (ban && (!ban.expires_at || Date.parse(ban.expires_at) > Date.now())) {
+          const denied = fail(403, 'Access denied.');
+          return path.startsWith('/api/') ? withCors(denied) : denied;
+        }
+        if (ban?.expires_at && Date.parse(ban.expires_at) <= Date.now()) {
+          await env.DB.prepare('DELETE FROM banned_ips WHERE ip = ? AND expires_at <= ?').bind(ip, new Date().toISOString()).run();
+        }
+      }
       if (path === '/api/health' && method === 'GET') return health(env);
-      if (path === '/api/auth/signup' && method === 'POST') return signup(request, env, await readBody(request));
+      if (path === '/api/security/turnstile-config' && method === 'GET') return json({ enabled: turnstileEnabled(env), site_key: turnstileEnabled(env) ? env.TURNSTILE_SITE_KEY : null });
+      if (path === '/api/security/turnstile-verify' && method === 'POST') return withCors(await verifyTurnstile(request, env, await readBody(request)));
+      if (turnstileEnabled(env) && isBrowserInitiated(request, url) && path !== '/api/security/turnstile-config' && path !== '/api/security/turnstile-verify' && path !== '/api/health' && path !== '/api/key-run') {
+        const clear = await hasTurnstileClearance(request, env);
+        if (!clear) {
+          if (path.startsWith('/api/')) return withCors(fail(403, 'Complete browser verification first.'));
+          if (isBrowserRequest(request)) return turnstileGatePage(request, env);
+        }
+      }
+      if (path === '/api/auth/signup' && method === 'POST') {
+        if (turnstileEnabled(env) && !(await hasTurnstileClearance(request, env))) return withCors(fail(403, 'Complete browser verification first.'));
+        return withCors(await signup(request, env, await readBody(request)));
+      }
       if (path === '/api/key-run' && method === 'POST') return keyRun(request, env, await readBody(request));
       if (path.startsWith('/api/')) return withCors(await handleApi(request, env, url));
       // html_handling: "none" 이므로 /, /login, /admin 을 HTML 파일에 명시적으로 연결한다.
@@ -184,7 +313,7 @@ async function health(env) {
     const owner = await env.DB.prepare("SELECT id FROM api_users WHERE role = 'owner' LIMIT 1").first();
     needsSetup = !owner;
   } catch {}
-  return json({ ok: true, service: 'tm-lua-host', database: !!env.DB, storage: !!env.BUCKET, needs_setup: needsSetup });
+  return json({ ok: true, service: 'tm-lua-host', database: !!env.DB, storage: !!env.BUCKET, turnstile: turnstileEnabled(env), needs_setup: needsSetup });
 }
 
 async function signup(request, env, body) {
@@ -217,7 +346,8 @@ async function handleApi(request, env, url) {
   const auth = await authenticate(request, env);
   if (!auth) {
     await audit(env, request, null, `${method} ${path}`, null, 'denied');
-    return fail(401, 'Unauthorized. Send Authorization: Bearer <API key>.');
+    const banned = await recordInvalidApiAuth(env, request, path, method);
+    return banned ? fail(403, 'Access temporarily blocked for 72 hours.') : fail(401, 'Unauthorized. Send Authorization: Bearer <API key>.');
   }
   const actor = auth.user;
   const manager = actor.role === 'owner' || actor.role === 'admin';
@@ -296,8 +426,13 @@ async function handleApi(request, env, url) {
 
   if (path === '/api/banned-ips' && method === 'GET') {
     if (!manager) return forbidden();
-    const { results = [] } = await env.DB.prepare('SELECT ip, reason, created_at FROM banned_ips ORDER BY created_at DESC LIMIT 1000').all();
+    const { results = [] } = await env.DB.prepare('SELECT ip, reason, created_at, expires_at, auto_ban FROM banned_ips ORDER BY created_at DESC LIMIT 1000').all();
     return json({ ok: true, banned_ips: results });
+  }
+  if (path === '/api/security-events' && method === 'GET') {
+    if (!manager) return forbidden();
+    const { results = [] } = await env.DB.prepare('SELECT id, ip, action, target, status, created_at FROM security_events ORDER BY created_at DESC LIMIT 500').all();
+    return json({ ok: true, events: results });
   }
   if (path === '/api/banned-ips' && method === 'POST') {
     if (!manager) return forbidden();
@@ -394,7 +529,7 @@ async function dashboard(env) {
     `SELECT ${SCRIPT_COLUMNS}, (SELECT COUNT(*) FROM script_files f WHERE f.script_id = hosted_scripts.id) AS file_count
      FROM hosted_scripts ORDER BY created_at ASC LIMIT 2000`
   ).all();
-  const { results: bannedIps = [] } = await env.DB.prepare('SELECT ip, reason, created_at FROM banned_ips ORDER BY created_at DESC LIMIT 1000').all();
+  const { results: bannedIps = [] } = await env.DB.prepare('SELECT ip, reason, created_at, expires_at, auto_ban FROM banned_ips ORDER BY created_at DESC LIMIT 1000').all();
   const totalUsers = await env.DB.prepare('SELECT COUNT(*) AS n FROM license_users').first();
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
@@ -741,7 +876,9 @@ async function keyRunCore(request, env, body) {
   ).bind(await sha256Hex(body.key.trim()), script.id).first();
   const valid = row && row.status === 'active' && row.user_status === 'active' && !isExpired(row.expires_at);
   if (!valid) {
-    await audit(env, request, null, 'script.key_run', script.id, 'denied');
+    const response = await recordInvalidScriptKey(env, request, script.id);
+    if (response.banned) return fail(403, 'Access temporarily blocked for 72 hours.');
+    if (response.decoy) return json({ ok: true, code: DECOY_CODE });
     return fail(403, 'Invalid or inactive script key.');
   }
   if (script.hwid_lock) {
