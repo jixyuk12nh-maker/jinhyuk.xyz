@@ -310,6 +310,14 @@ async function handleApi(request, env, url) {
   }
   const scriptKeysMatch = path.match(/^\/api\/scripts\/([A-Za-z0-9_-]{8,40})\/keys$/);
   if (scriptKeysMatch && method === 'POST') return issueScriptKey(request, env, auth, scriptKeysMatch[1], await readBody(request));
+  const scriptBulkMatch = path.match(/^\/api\/scripts\/([A-Za-z0-9_-]{8,40})\/keys\/(bulk|import|unused|export)$/);
+  if (scriptBulkMatch) {
+    const [, sid, action] = scriptBulkMatch;
+    if (action === 'bulk' && method === 'POST') return bulkIssueScriptKeys(request, env, auth, sid, await readBody(request));
+    if (action === 'import' && method === 'POST') return importScriptKeys(request, env, auth, sid, await readBody(request));
+    if (action === 'unused' && method === 'DELETE') return deleteUnusedScriptKeys(request, env, auth, sid);
+    if (action === 'export' && method === 'GET') return exportScriptKeys(env, auth, sid);
+  }
   const scriptFilesMatch = path.match(/^\/api\/scripts\/([A-Za-z0-9_-]{8,40})\/files$/);
   if (scriptFilesMatch && method === 'GET') {
     return listScriptFiles(env, scriptFilesMatch[1]);
@@ -997,6 +1005,23 @@ async function deleteScriptFile(request, env, auth, id) {
   return json({ ok: true, id });
 }
 
+const MIN_KEY_MINUTES = 30;
+const MAX_KEY_MINUTES = 3650 * 1440;
+const cleanText = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+
+const expiresFromMinutes = (value) => {
+  const minutes = Number(value);
+  if (!Number.isInteger(minutes) || minutes < MIN_KEY_MINUTES || minutes > MAX_KEY_MINUTES) return { ok: false };
+  return { ok: true, expiresAt: new Date(Date.now() + minutes * 60000).toISOString() };
+};
+
+const keyExpiry = (body) => {
+  if (body?.expires_in_minutes !== undefined && body?.expires_in_minutes !== null && body?.expires_in_minutes !== '') {
+    return expiresFromMinutes(body.expires_in_minutes);
+  }
+  return expiresFromDays(body?.expires_in_days === '' ? undefined : body?.expires_in_days);
+};
+
 async function issueScriptKey(request, env, auth, scriptId, body) {
   const actor = auth.user;
   const manager = actor.role !== 'user';
@@ -1011,19 +1036,100 @@ async function issueScriptKey(request, env, auth, scriptId, body) {
     if (found.status !== 'active') return fail(409, 'User is blocked.');
     holderId = found.id;
   }
-  const expiry = expiresFromDays(body?.expires_in_days);
-  if (!expiry.ok) return fail(400, 'expires_in_days must be between 1 and 3650.');
+  const expiry = keyExpiry(body);
+  if (!expiry.ok) return fail(400, 'Expiry must be at least 30 minutes, or empty for a permanent key.');
+  const memo = cleanText(body?.memo, 300);
+  const discordId = cleanText(body?.discord_id, 20).replace(/\D/g, '');
   const token = newSecret('skey_', 32);
   const keyId = randomHex(12);
-  await env.DB.prepare('INSERT INTO script_keys (id, script_id, user_id, key_hash, key_prefix, created_by, expires_at) VALUES (?,?,?,?,?,?,?)')
-    .bind(keyId, script.id, holderId, await sha256Hex(token), token.slice(0, 12), actor.id, expiry.expiresAt).run();
+  await env.DB.prepare('INSERT INTO script_keys (id, script_id, user_id, key_hash, key_prefix, created_by, expires_at, token, memo, discord_id) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .bind(keyId, script.id, holderId, await sha256Hex(token), token.slice(0, 12), actor.id, expiry.expiresAt, token, memo, discordId).run();
   await audit(env, request, auth, 'script_key.issue', keyId, 'ok');
-  return json({ ok: true, key: { id: keyId, script_id: script.id, slug: script.slug, user_id: holderId, token, expires_at: expiry.expiresAt } }, 201);
+  return json({ ok: true, key: { id: keyId, script_id: script.id, slug: script.slug, user_id: holderId, token, expires_at: expiry.expiresAt, memo, discord_id: discordId } }, 201);
+}
+
+async function findKeyScript(env, scriptId) {
+  const script = await env.DB.prepare('SELECT id, slug, mode FROM hosted_scripts WHERE id = ?').bind(scriptId).first();
+  if (!script) return { error: fail(404, 'Script not found.') };
+  if (script.mode !== 'key') return { error: fail(400, 'This script is keyless. No script key is needed.') };
+  return { script };
+}
+
+async function bulkIssueScriptKeys(request, env, auth, scriptId, body) {
+  const found = await findKeyScript(env, scriptId);
+  if (found.error) return found.error;
+  const count = Number(body?.count);
+  if (!Number.isInteger(count) || count < 1 || count > 300) return fail(400, 'count must be between 1 and 300.');
+  const expiry = keyExpiry(body);
+  if (!expiry.ok) return fail(400, 'Expiry must be at least 30 minutes, or empty for a permanent key.');
+  const keys = [];
+  for (let i = 0; i < count; i += 1) {
+    const token = newSecret('skey_', 32);
+    const keyId = randomHex(12);
+    await env.DB.prepare('INSERT INTO script_keys (id, script_id, user_id, key_hash, key_prefix, created_by, expires_at, token) VALUES (?,?,?,?,?,?,?,?)')
+      .bind(keyId, found.script.id, auth.user.id, await sha256Hex(token), token.slice(0, 12), auth.user.id, expiry.expiresAt, token).run();
+    keys.push({ id: keyId, token });
+  }
+  await audit(env, request, auth, 'script_key.bulk', found.script.id, 'ok');
+  return json({ ok: true, count: keys.length, keys, slug: found.script.slug, expires_at: expiry.expiresAt }, 201);
+}
+
+async function importScriptKeys(request, env, auth, scriptId, body) {
+  const found = await findKeyScript(env, scriptId);
+  if (found.error) return found.error;
+  const entries = Array.isArray(body?.entries) ? body.entries : null;
+  if (!entries) return fail(400, 'entries array is required.');
+  if (entries.length > 300) return fail(400, 'Import at most 300 entries at once.');
+  let room = Infinity;
+  let added = 0;
+  let duplicates = 0;
+  let skipped = 0;
+  for (const entry of entries) {
+    const token = typeof entry?.key === 'string' ? entry.key.trim() : '';
+    if (!token || token.length > 128 || room <= 0) {
+      skipped += 1;
+      continue;
+    }
+    const hash = await sha256Hex(token);
+    const exists = await env.DB.prepare('SELECT id FROM script_keys WHERE key_hash = ?').bind(hash).first();
+    if (exists) {
+      duplicates += 1;
+      continue;
+    }
+    await env.DB.prepare('INSERT INTO script_keys (id, script_id, user_id, key_hash, key_prefix, created_by, expires_at, token) VALUES (?,?,?,?,?,?,?,?)')
+      .bind(randomHex(12), found.script.id, auth.user.id, hash, token.slice(0, 12), auth.user.id, null, token).run();
+    added += 1;
+    room -= 1;
+  }
+  await audit(env, request, auth, 'script_key.import', found.script.id, 'ok');
+  return json({ ok: true, added, duplicates, skipped });
+}
+
+async function deleteUnusedScriptKeys(request, env, auth, scriptId) {
+  const found = await findKeyScript(env, scriptId);
+  if (found.error) return found.error;
+  const own = auth.user.role === 'user';
+  const sql = 'DELETE FROM script_keys WHERE script_id = ? AND last_used_at IS NULL AND hwid IS NULL' + (own ? ' AND user_id = ?' : '');
+  const bound = own ? [found.script.id, auth.user.id] : [found.script.id];
+  const result = await env.DB.prepare(sql).bind(...bound).run();
+  const removed = result.meta?.changes ?? 0;
+  await audit(env, request, auth, 'script_key.delete_unused', found.script.id, 'ok');
+  return json({ ok: true, removed });
+}
+
+async function exportScriptKeys(env, auth, scriptId) {
+  const found = await findKeyScript(env, scriptId);
+  if (found.error) return found.error;
+  const own = auth.user.role === 'user';
+  const sql = 'SELECT id, token, status, expires_at FROM script_keys WHERE script_id = ? AND token IS NOT NULL' + (own ? ' AND user_id = ?' : '') + ' ORDER BY created_at DESC';
+  const bound = own ? [found.script.id, auth.user.id] : [found.script.id];
+  const { results = [] } = await env.DB.prepare(sql).bind(...bound).all();
+  return json({ ok: true, slug: found.script.slug, keys: results });
 }
 
 async function listScriptKeys(env, auth) {
   const actor = auth.user;
-  const base = `SELECT sk.id, sk.script_id, s.slug, sk.user_id, u.username, sk.key_prefix, sk.status, sk.expires_at, sk.created_at, sk.last_used_at, (sk.hwid IS NOT NULL) AS hwid_bound
+  const base = `SELECT sk.id, sk.script_id, s.slug, sk.user_id, u.username, sk.key_prefix, sk.memo, sk.discord_id, sk.status, sk.expires_at, sk.created_at, sk.last_used_at, (sk.hwid IS NOT NULL) AS hwid_bound
     FROM script_keys sk JOIN hosted_scripts s ON s.id = sk.script_id JOIN api_users u ON u.id = sk.user_id`;
   const statement = actor.role === 'user'
     ? env.DB.prepare(`${base} WHERE sk.user_id = ? ORDER BY sk.created_at DESC LIMIT 200`).bind(actor.id)
@@ -1039,6 +1145,13 @@ async function updateScriptKey(request, env, auth, keyId, body) {
   if (!row) return fail(404, 'Key not found.');
   if (!scopeAllows(actor, row.holder_role)) return fail(403, 'Admins can only manage user keys.');
   if (row.status === 'revoked') return fail(409, 'Revoked keys cannot be changed.');
+  if (body && (body.memo !== undefined || body.discord_id !== undefined)) {
+    const memo = cleanText(body.memo, 300);
+    const discordId = cleanText(body.discord_id, 20).replace(/\D/g, '');
+    await env.DB.prepare('UPDATE script_keys SET memo = ?, discord_id = ? WHERE id = ?').bind(memo, discordId, keyId).run();
+    await audit(env, request, auth, 'script_key.meta', keyId, 'ok');
+    return json({ ok: true, id: keyId, memo, discord_id: discordId });
+  }
   if (body?.reset_hwid === true) {
     await env.DB.prepare('UPDATE script_keys SET hwid = NULL WHERE id = ?').bind(keyId).run();
     await audit(env, request, auth, 'script_key.reset_hwid', keyId, 'ok');
