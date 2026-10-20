@@ -15,7 +15,7 @@
   const TOKEN_RE = /^tmk_[A-Za-z0-9_-]{20,}$/;
   const GEAR = '<svg viewBox="0 0 24 24" aria-hidden="true" width="18" height="18" fill="currentColor"><path d="m19.42 13.1 1.11.86-1.93 3.34-1.3-.52c-.47.35-.99.65-1.55.87l-.19 1.38h-3.85l-.19-1.38c-.56-.22-1.08-.52-1.55-.87l-1.3.52-1.93-3.34 1.11-.86a6.96 6.96 0 0 1 0-1.8l-1.11-.86L8.67 7.1l1.3.52c.47-.35.99-.65 1.55-.87l.19-1.38h3.85l.19 1.38c.56.22 1.08.52 1.55.87l1.3-.52 1.93 3.34-1.11.86c.08.59.08 1.21 0 1.8ZM13.64 14.3a2.95 2.95 0 1 0 0-5.9 2.95 2.95 0 0 0 0 5.9Z"/></svg>';
 
-  const db = { projects: [], scripts: [], banned: [], keys: [], scriptKeys: [], usage: { obfuscations: 0, limit: null }, selectedId: null, apiKey: '', role: '', me: null };
+  const db = { projects: [], scripts: [], banned: [], keys: [], users: [], scriptKeys: [], usage: { obfuscations: 0, limit: null }, selectedId: null, apiKey: '', role: '', me: null };
   let view = 'projects';
   let editScriptId = null;
   let loadedCode = null;
@@ -42,6 +42,20 @@
   };
 
   const fmtSize = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
+  const MIN_EXPIRY_MINUTES = 30;
+  const MAX_EXPIRY_MINUTES = 3650 * 1440;
+  function expiryMinutes(text) {
+    const t = String(text || '').trim();
+    if (!t) return undefined;
+    return /^-?\d+$/.test(t) ? Number(t) : NaN;
+  }
+  function expiryError(minutes) {
+    if (minutes === undefined) return '';
+    if (!Number.isInteger(minutes) || minutes < MIN_EXPIRY_MINUTES || minutes > MAX_EXPIRY_MINUTES) {
+      return 'Expiry must be 30 to 5256000 minutes, or empty for a permanent key.';
+    }
+    return '';
+  }
   const maskKey = (k) => (k.length > 8 ? k.slice(0, 4) + '••••••••' + k.slice(-4) : '••••••••');
   const project = (id) => db.projects.find((p) => p.id === id) || null;
   const selected = () => project(db.selectedId);
@@ -117,6 +131,12 @@
       db.keys = [];
     }
     try {
+      const data = await api('/api/users');
+      db.users = data.users || [];
+    } catch {
+      db.users = [];
+    }
+    try {
       const data = await api('/api/script-keys');
       db.scriptKeys = data.keys || [];
     } catch {
@@ -128,7 +148,7 @@
     if (!db.apiKey) {
       db.projects = [];
       db.scripts = [];
-      db.keys = []; db.scriptKeys = [];
+      db.keys = []; db.users = []; db.scriptKeys = [];
       renderAll();
       return;
     }
@@ -161,7 +181,7 @@
   function clearData() {
     db.projects = [];
     db.scripts = [];
-    db.keys = []; db.scriptKeys = [];
+    db.keys = []; db.users = []; db.scriptKeys = [];
   }
 
   async function loadUserWorkspace() {
@@ -302,7 +322,7 @@
     $('viewUsers').classList.toggle('active', users);
     $('viewScriptKeys').classList.toggle('active', keys);
     $('metrics').className = 'metrics ' + (profile ? 'is-profile' : users ? 'is-users' : keys ? 'is-keys' : 'is-projects');
-    const label = profile ? 'Profile' : users ? 'API Keys' : keys ? 'Users' : 'Projects';
+    const label = profile ? 'Profile' : users ? 'API Keys' : keys ? 'Script Keys' : 'Projects';
     $('crumb').textContent = label;
     $('pageTitle').textContent = label;
     document.title = 'jinhyuk.xyz — ' + label;
@@ -372,58 +392,112 @@
     return db.keys.filter((k) => k.project_id === id);
   }
 
+  const canManage = (a) => !!db.me && a.id !== db.me.id && (db.role === 'owner' || (db.role === 'admin' && a.role === 'user'));
+
   function renderUsers() {
     const list = $('userList');
     list.textContent = '';
-    $('usersEmpty').hidden = db.projects.length > 0;
-    db.projects.forEach((p) => {
-      const keys = projectKeys(p.id);
-      const active = keys.filter((k) => !k.revoked_at).length;
+    const rank = { owner: 0, admin: 1, user: 2 };
+    const accounts = new Map();
+    db.users.forEach((u) => accounts.set(u.id, { id: u.id, username: u.username, role: u.role, status: u.status || 'active', keys: [] }));
+    db.keys.forEach((k) => {
+      if (!accounts.has(k.user_id)) accounts.set(k.user_id, { id: k.user_id, username: k.username, role: k.user_role, status: 'active', keys: [] });
+      accounts.get(k.user_id).keys.push(k);
+    });
+    const rows = [...accounts.values()].sort((a, b) => (rank[a.role] ?? 9) - (rank[b.role] ?? 9) || a.username.localeCompare(b.username));
+    $('usersEmpty').hidden = rows.length > 0;
+    rows.forEach((a) => {
+      const active = a.keys.filter((k) => !k.revoked_at).length;
+      const manage = canManage(a);
+
       const row = document.createElement('article');
       row.className = 'user-row';
 
       const info = document.createElement('div');
       info.className = 'project';
-      info.dataset.action = 'add-user';
-      info.dataset.project = p.id;
-      info.setAttribute('role', 'button');
-      info.tabIndex = 0;
-      info.innerHTML = '<span class="side-icon key">' + ICON_KEY + '</span><div class="project-mark" aria-hidden="true"><span></span><span></span><span></span></div>';
+      const pill = document.createElement('span');
+      pill.className = 'role-pill role-' + (a.role || 'user');
+      pill.textContent = String(a.role || 'user').toUpperCase();
       const text = document.createElement('div');
       text.className = 'project-text';
       const h = document.createElement('h3');
-      h.textContent = p.name;
+      h.textContent = a.username + (a.status === 'blocked' ? '  · 차단됨' : '');
       const sub = document.createElement('p');
       sub.textContent = countLabel(active, 'API key');
       text.append(h, sub);
-      info.appendChild(text);
+      info.append(pill, text);
 
       const actions = document.createElement('div');
-      actions.className = 'panel-actions';
-      actions.innerHTML =
-        '<button class="btn primary" data-action="add-user" data-project="' + p.id + '">+ ADD USER</button>' +
-        '<button class="btn" data-action="edit-users" data-project="' + p.id + '">EDIT USERS</button>' +
-        '<button class="btn icon" aria-label="Manage API keys" data-action="manage-users" data-project="' + p.id + '">' + GEAR + '</button>';
+      actions.className = 'panel-actions account-actions';
+      a.keys.filter((k) => !k.revoked_at).slice(0, 3).forEach((k) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'key-chip';
+        chip.dataset.action = 'key-revoke';
+        chip.dataset.id = k.id;
+        chip.title = '이 키 해지';
+        chip.textContent = (k.key_prefix || 'tmk_') + '… ✕';
+        if (!manage) chip.disabled = true;
+        actions.appendChild(chip);
+      });
+      if (manage && db.role === 'owner') {
+        const sel = document.createElement('select');
+        sel.className = 'role-select';
+        sel.dataset.roleFor = a.id;
+        ['user', 'admin', 'owner'].forEach((r) => {
+          const o = document.createElement('option');
+          o.value = r;
+          o.textContent = r.toUpperCase();
+          o.selected = r === a.role;
+          sel.appendChild(o);
+        });
+        actions.appendChild(sel);
+      }
+      if (manage) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn sm ' + (a.status === 'blocked' ? '' : 'danger');
+        b.dataset.action = 'acct-status';
+        b.dataset.id = a.id;
+        b.dataset.status = a.status === 'blocked' ? 'active' : 'blocked';
+        b.textContent = a.status === 'blocked' ? '차단 해제' : '차단';
+        actions.appendChild(b);
+      }
 
       row.append(info, actions);
       list.appendChild(row);
     });
-    const orphans = db.keys.filter((k) => !k.project_id);
-    if (orphans.length) {
-      const row = document.createElement('article');
-      row.className = 'user-row';
-      const text = document.createElement('div');
-      text.className = 'project-text';
-      const h = document.createElement('h3');
-      h.textContent = '프로젝트 없음';
-      const sub = document.createElement('p');
-      sub.textContent = countLabel(orphans.filter((k) => !k.revoked_at).length, 'API key') + ' · 삭제된 프로젝트에서 남은 키';
-      text.append(h, sub);
-      const actions = document.createElement('div');
-      actions.className = 'panel-actions';
-      actions.innerHTML = '<button class="btn icon" aria-label="Manage API keys without project" data-action="manage-users" data-project="' + ORPHAN_ID + '">' + GEAR + '</button>';
-      row.append(text, actions);
-      list.appendChild(row);
+  }
+
+  async function setUserStatus(id, status) {
+    try {
+      await api(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      toast(status === 'blocked' ? '계정을 차단했습니다.' : '차단을 해제했습니다.');
+      await refresh();
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+
+  async function setUserRole(id, role) {
+    try {
+      await api(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify({ role }) });
+      toast('역할을 ' + role.toUpperCase() + '(으)로 바꿨습니다.');
+      await refresh();
+    } catch (error) {
+      toast(error.message);
+      renderAll();
+    }
+  }
+
+  async function revokeKeyById(id) {
+    if (!confirm('이 API 키를 해지할까요? 이 키로 로그인하던 기기는 바로 막힙니다.')) return;
+    try {
+      await api(`/api/keys/${id}`, { method: 'DELETE' });
+      toast('API 키를 해지했습니다.');
+      await refresh();
+    } catch (error) {
+      toast(error.message);
     }
   }
 
@@ -496,11 +570,11 @@
       $('userMeta').textContent = live + '/' + list.length + ' issued';
       setBar($('userBar'), list.length ? live / list.length * 100 : 0);
     } else {
-      const active = activeKeys().length;
+      const accounts = db.users.length;
       $('userLabel').textContent = 'Total Users';
-      $('userCount').textContent = active;
-      $('userMeta').textContent = active + '/' + KEY_LIMIT;
-      setBar($('userBar'), active / KEY_LIMIT * 100);
+      $('userCount').textContent = accounts;
+      $('userMeta').textContent = accounts + '/' + KEY_LIMIT;
+      setBar($('userBar'), accounts / KEY_LIMIT * 100);
     }
     const banned = $('bannedCard');
     banned.querySelector('.metric-copy strong').textContent = db.banned.length;
@@ -988,7 +1062,7 @@
     $('apiKey').value = '';
     db.projects = [];
     db.scripts = [];
-    db.keys = []; db.scriptKeys = [];
+    db.keys = []; db.users = []; db.scriptKeys = [];
     renderAll();
     renderApiStatus();
     banner('accountBanner', 'API key removed.', 'ok');
@@ -1495,6 +1569,8 @@
       case 'close-menu': closeMenu(); break;
       case 'notify': toast('No notifications yet.'); break;
       case 'toast': toast(btn.dataset.msg); break;
+      case 'acct-status': setUserStatus(btn.dataset.id, btn.dataset.status); break;
+      case 'key-revoke': revokeKeyById(btn.dataset.id); break;
     }
   });
 
@@ -1522,6 +1598,10 @@
   $('apiToggle').addEventListener('click', toggleApiVisibility);
   $('apiSave').addEventListener('click', (e) => saveApiKey(e.currentTarget));
   $('apiRemove').addEventListener('click', removeApiKey);
+  $('userList').addEventListener('change', (e) => {
+    const sel = e.target.closest('select[data-role-for]');
+    if (sel) setUserRole(sel.dataset.roleFor, sel.value);
+  });
   $('setupCreate').addEventListener('click', (e) => createOwner(e.currentTarget));
   $('clearAll').addEventListener('click', removeApiKey);
   $('keySearch').addEventListener('input', renderKeys);

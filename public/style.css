@@ -253,15 +253,70 @@ body.show-icons .side-icon{display:grid}
   *,*::before,*::after{transition:none!important;animation:none!important}
 }
 
-.appbar{position:sticky;top:12px;z-index:40;display:flex;align-items:center;height:64px;margin:12px 16px 0;padding:0 20px;border:1px solid rgba(255,255,255,.2);border-radius:16px;background:linear-gradient(160deg,rgba(70,74,84,.92),rgba(28,30,36,.95));box-shadow:0 14px 34px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.12);-webkit-backdrop-filter:blur(20px) saturate(130%);backdrop-filter:blur(20px) saturate(130%)}
+.appbar{position:sticky;top:14px;z-index:40;display:flex;align-items:center;height:80px;margin:14px 16px 0;padding:0 26px;border:1px solid rgba(255,255,255,.2);border-radius:16px;background:linear-gradient(160deg,rgba(70,74,84,.92),rgba(28,30,36,.95));box-shadow:0 14px 34px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.12);-webkit-backdrop-filter:blur(20px) saturate(130%);backdrop-filter:blur(20px) saturate(130%)}
 .wdots{display:flex;margin-right:18px}
 .wdots i{display:block;width:11px;height:11px;margin-right:7px;border-radius:50%;background:rgba(255,255,255,.22);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
 .brand{display:inline-flex;align-items:center;color:var(--text);text-decoration:none}
-.brand .project-mark{width:28px;height:28px;flex:0 0 28px}
+.brand .project-mark{width:36px;height:36px;flex:0 0 36px}
 .brand .project-mark span{width:5px;height:5px}
 .brand .project-mark span:nth-child(1){top:6px;left:6px}
 .brand .project-mark span:nth-child(2){top:14px;left:6px}
 .brand .project-mark span:nth-child(3){top:10px;left:15px}
-.brand strong{margin-left:12px;font-size:18px;font-weight:800;letter-spacing:-.3px;color:#fff}
+.brand strong{margin-left:14px;font-size:22px;font-weight:800;letter-spacing:-.3px;color:#fff}
 
 .appbar-tools{margin-left:auto;display:flex;align-items:center;gap:6px}
+
+.appbar .btn.sm{min-height:44px;padding:0 20px;font-size:14px}
+.hero{display:grid;gap:18px;padding:44px 8px 18px}
+.hero .eyebrow{font-size:13px;font-weight:700;letter-spacing:2px;color:var(--muted);text-transform:uppercase}
+.hero h2{margin:0;font-size:clamp(30px,5vw,46px);line-height:1.12;letter-spacing:-1px;color:#fff}
+.hero p{margin:0;max-width:620px;color:var(--muted);font-size:17px;line-height:1.6}
+.hero .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px}
+.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:30px}
+.feat{padding:24px;border:1px solid var(--line);border-radius:20px;background:var(--glass);box-shadow:0 12px 30px rgba(0,0,0,.3)}
+.feat .n{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:10px;background:rgba(255,255,255,.1);font-weight:800;color:#fff;margin-bottom:14px}
+.feat h3{margin:0 0 8px;font-size:17px;color:#fff}
+.feat p{margin:0;color:var(--muted);font-size:14px;line-height:1.55}
+.login-wrap{min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:24px}
+.login-card{width:100%;max-width:440px;padding:30px;border:1px solid rgba(255,255,255,.2);border-radius:22px;background:linear-gradient(160deg,rgba(70,74,84,.92),rgba(28,30,36,.95));box-shadow:0 20px 50px rgba(0,0,0,.5);display:grid;gap:18px}
+.login-card h1{margin:0;font-size:24px;color:#fff}
+.login-card .steps-note{margin:0;color:var(--muted);font-size:14px;line-height:1.6}
+.login-card .msg{min-height:20px;margin:0;font-size:13px;color:#fca5a5}
+.login-card .msg.ok{color:#86efac}
+.steps-list{margin:0;padding:0 0 0 18px;color:var(--muted);font-size:13px;line-height:1.7}
+@media (max-width:640px){.appbar{height:72px;padding:0 16px}.brand strong{font-size:19px}.hero{padding-top:28px}}
+
+.login-wrap{padding:28px}
+.login-card{max-width:620px;padding:44px 40px;gap:24px}
+.api-field{display:grid;gap:14px}
+.api-title{font-size:56px;font-weight:900;letter-spacing:-1px;color:#fff;line-height:1}
+.api-field input{width:100%;min-height:64px;padding:18px 20px;border:1px solid rgba(255,255,255,.22);border-radius:16px;background:rgba(0,0,0,.4);color:var(--text);font:500 18px Inter,sans-serif;outline:0}
+.api-field input:focus{border-color:rgba(229,231,235,.7);box-shadow:0 0 0 4px rgba(229,231,235,.14)}
+.big-btn{min-height:62px;font-size:17px}
+.login-card .msg{font-size:15px;min-height:24px}
+
+.login-card{align-self:center;align-content:center;height:auto}
+.api-field{justify-items:center}
+.api-title{display:block;width:100%;text-align:center}
+
+@keyframes riseIn{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:none}}
+.rise{animation:riseIn .65s cubic-bezier(.2,.7,.2,1) both}
+@media (prefers-reduced-motion: reduce){.rise{animation:none}}
+
+.appbar{position:fixed;top:14px;left:16px;right:16px;margin:0}
+body:has(> .appbar){padding-top:96px}
+@media (max-width:640px){.appbar{top:10px;left:10px;right:10px}body:has(> .appbar){padding-top:88px}}
+
+.role-pill{display:inline-flex;align-items:center;justify-content:center;min-width:76px;height:30px;padding:0 12px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.6px;border:1px solid rgba(255,255,255,.22);background:rgba(255,255,255,.1);color:#fff;flex:0 0 auto}
+.role-pill.role-owner{background:linear-gradient(135deg,#fde68a,#f59e0b);color:#1f1a0a;border-color:transparent}
+.role-pill.role-admin{background:linear-gradient(135deg,#bfdbfe,#60a5fa);color:#0b1d33;border-color:transparent}
+.role-pill.role-user{background:rgba(255,255,255,.14);color:#e5e7eb}
+.key-chip{display:inline-flex;align-items:center;height:30px;padding:0 10px;border-radius:9px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.14);color:var(--muted);font-size:12px}
+.key-chip.revoked{opacity:.5;text-decoration:line-through}
+
+.account-actions{flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.key-chip{cursor:pointer;font-family:inherit}
+.key-chip:disabled{cursor:default;opacity:.55}
+.key-chip:hover:not(:disabled){background:rgba(239,68,68,.2);color:#fff}
+.role-select{min-height:36px;padding:0 10px;border-radius:10px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.35);color:var(--text);font:600 12px Inter,sans-serif}
+.role-select option{background:#23262d;color:var(--text)}
