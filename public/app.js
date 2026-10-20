@@ -290,7 +290,7 @@
 
   function renderChrome() {
     const isUser = db.role === 'user';
-    $('drawer').querySelectorAll('.nav-item[data-nav="users"], .nav-item[data-nav="banned"]').forEach((b) => { b.hidden = isUser; });
+    $('drawer').querySelectorAll('.nav-item[data-nav="users"]').forEach((b) => { b.hidden = isUser; });
     if (isUser && view === 'users') view = 'projects';
     const keys = view === 'script-keys';
     const users = view === 'users';
@@ -300,7 +300,7 @@
     $('viewUsers').classList.toggle('active', users);
     $('viewScriptKeys').classList.toggle('active', keys);
     $('metrics').className = 'metrics ' + (profile ? 'is-profile' : users ? 'is-users' : keys ? 'is-keys' : 'is-projects');
-    const label = profile ? '프로필' : users ? 'API Keys' : keys ? 'Users' : 'Projects';
+    const label = profile ? 'Profile' : users ? 'API Keys' : keys ? 'Users' : 'Projects';
     $('crumb').textContent = label;
     $('pageTitle').textContent = label;
     document.title = 'Luarmor — ' + label;
@@ -1179,14 +1179,6 @@
     }
   }
 
-  function goBanned() {
-    if (view !== 'users') showView('users');
-    setTimeout(() => {
-      $('bannedCard').scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
-      flash($('bannedCard'));
-    }, 250);
-  }
-
   $('userList').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
     const row = e.target.closest('.project[data-action="add-user"]');
@@ -1241,8 +1233,6 @@
     closeMenu();
     if (target === 'projects' || target === 'profile' || target === 'users' || target === 'script-keys') {
       showView(target);
-    } else if (target === 'banned') {
-      goBanned();
     } else if (target === 'settings') {
       openAccount();
     }
