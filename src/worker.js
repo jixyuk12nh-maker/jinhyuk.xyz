@@ -5,10 +5,10 @@ const ROLES = ['owner', 'admin', 'user'];
 const MODES = ['keyless', 'key'];
 const POLICIES = ['open', 'closed'];
 const KEY_STATUSES = ['active', 'suspended'];
-const RESERVED = ['api', 'raw', 'assets', 'favicon.ico', 'robots.txt'];
+const RESERVED = ['api', 'raw', 'assets', 'admin', 'favicon.ico', 'robots.txt'];
 const SLUG_RE = /^[\p{L}\p{N}_-]{1,56}(\.lua)?$/u;
 const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
-const KEY_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const SCRIPT_LIMIT = 18;
 const USER_LIMIT = 10000;
 const OBF_LIMIT = 3000;
@@ -23,15 +23,21 @@ const plain = (body, status) => new Response(body, { status, headers: TEXT_HEADE
 const toHex = (buffer) => [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
 const sha256Hex = async (value) => toHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
 const randomHex = (bytes = 12) => toHex(crypto.getRandomValues(new Uint8Array(bytes)));
-const newSecret = (prefix) => {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  return prefix + btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-};
-const licenseKey = () => {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
+// 대소문자 영문 + 숫자 중에서 균등하게 뽑는다 (256을 62로 나눈 나머지 편향을 피하려고 248 미만만 사용).
+const randomAlnum = (length) => {
   let out = '';
-  bytes.forEach((b) => { out += KEY_CHARS[b % KEY_CHARS.length]; });
-  return `LM-${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8, 12)}-${out.slice(12, 16)}`;
+  while (out.length < length) {
+    const bytes = crypto.getRandomValues(new Uint8Array(length * 2));
+    for (const b of bytes) {
+      if (b < 248 && out.length < length) out += ALNUM[b % ALNUM.length];
+    }
+  }
+  return out;
+};
+const newSecret = (prefix, length = 52) => prefix + randomAlnum(length);
+const licenseKey = () => {
+  const s = randomAlnum(20);
+  return `${s.slice(0, 5)}-${s.slice(5, 10)}-${s.slice(10, 15)}-${s.slice(15, 20)}`;
 };
 const safeName = (value) => String(value ?? '').trim().replace(/[<>\u0000-\u001f]/g, '').slice(0, 80);
 const normalizeSlug = (value) => String(value ?? '').trim().normalize('NFC').toLowerCase();
@@ -82,6 +88,12 @@ const readBody = (request) => request.json().catch(() => null);
 const isExpired = (iso) => !!iso && Date.parse(iso) <= Date.now();
 const isBrowserNavigation = (request) =>
   request.headers.get('sec-fetch-mode') === 'navigate' || request.headers.get('sec-fetch-dest') === 'document';
+// 구형 모바일 브라우저는 sec-fetch 헤더를 보내지 않으므로 Accept의 text/html도 브라우저로 본다.
+const isBrowserRequest = (request) =>
+  isBrowserNavigation(request) || (request.headers.get('accept') || '').includes('text/html');
+const KEY_RUN_FAIL_LIMIT = 30;
+const KEY_RUN_WINDOW_MS = 10 * 60 * 1000;
+const KEY_RUN_BLOCK_MS = 10 * 60 * 1000;
 const expiresFromDays = (value) => {
   if (value === undefined || value === null) return { ok: true, expiresAt: null };
   const days = Number(value);
@@ -132,6 +144,9 @@ export default {
       if (path === '/api/auth/signup' && method === 'POST') return signup(request, env, await readBody(request));
       if (path === '/api/key-run' && method === 'POST') return keyRun(request, env, await readBody(request));
       if (path.startsWith('/api/')) return await handleApi(request, env, url);
+      if (path === '/admin' || path === '/admin/') {
+        return env.ASSETS ? env.ASSETS.fetch(new Request(new URL('/admin.html', url), request)) : plain('Not found', 404);
+      }
       const rawId = path.match(/^\/raw\/([A-Za-z0-9_-]{8,40})$/);
       if (rawId && method === 'GET') return await serveRaw(request, env, 'id', rawId[1]);
       const slug = slugFromPath(path);
@@ -588,9 +603,52 @@ async function unbanIp(request, env, auth, ip) {
   return json({ ok: true, ip });
 }
 
+const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex' };
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// 브라우저로 스크립트 주소를 열었을 때 원문 대신 보여주는 페이지. 코드는 포함하지 않는다.
+function scriptPage(request, row) {
+  const page = (status, title, inner) => new Response(`<!doctype html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>${esc(title)}</title><link rel="stylesheet" href="/style.css"></head>
+<body><main class="shell">${inner}<footer class="footer">© 2026 jinhyuk.xyz</footer></main></body></html>`, { status, headers: HTML_HEADERS });
+  if (!row) {
+    return page(404, '스크립트를 찾을 수 없습니다', `<header class="topbar"><div><h1>스크립트를 찾을 수 없습니다</h1><p class="hint">주소를 다시 확인하세요.</p></div></header>`);
+  }
+  const keyMode = row.mode === 'key';
+  const origin = new URL(request.url).origin;
+  const loader = `${keyMode ? 'script_key = "여기에_스크립트_키"\n' : ''}loadstring(game:HttpGet("${origin}/${row.slug}"))()`;
+  const note = keyMode
+    ? '이 스크립트는 스크립트 키가 있어야 실행됩니다. 발급받은 키를 위 줄에 넣으세요.'
+    : '아래 로더를 Roblox 실행기에 붙여넣으면 바로 실행됩니다.';
+  return page(200, row.name, `
+  <header class="topbar"><div><nav class="breadcrumb"><span>jinhyuk.xyz</span></nav><h1>${esc(row.name)}</h1></div></header>
+  <section class="panel">
+    <div class="panel-head">
+      <div class="project-text"><p>${esc(row.slug)}</p></div>
+      <span class="pill ${keyMode ? 'draft' : 'active'}">${keyMode ? 'KEY 필요' : '공개'}</span>
+    </div>
+    <div class="block" style="padding:22px;gap:14px">
+      <p class="hint">${esc(note)}</p>
+      <pre style="overflow-x:auto;padding:16px;border-radius:12px;background:rgba(0,0,0,.35);font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre"><code id="loader">${esc(loader)}</code></pre>
+      <div class="row-inline"><button class="btn primary" id="copy" type="button">로더 복사</button></div>
+    </div>
+  </section>
+  <script>
+    document.getElementById('copy').addEventListener('click', async (e) => {
+      try {
+        await navigator.clipboard.writeText(document.getElementById('loader').textContent);
+        e.currentTarget.textContent = '복사됨';
+      } catch {
+        e.currentTarget.textContent = '복사 실패';
+      }
+    });
+  </script>`);
+}
+
 async function serveRaw(request, env, kind, value) {
-  if (isBrowserNavigation(request)) return plain('403 Forbidden', 403);
-  const row = await env.DB.prepare(`SELECT id, slug, object_key, sha256, mode FROM hosted_scripts WHERE ${kind === 'id' ? 'id' : 'slug'} = ?`).bind(value).first();
+  const row = await env.DB.prepare(`SELECT id, slug, name, object_key, sha256, mode FROM hosted_scripts WHERE ${kind === 'id' ? 'id' : 'slug'} = ?`).bind(value).first();
+  const browser = row?.mode === 'key' ? isBrowserRequest(request) : isBrowserNavigation(request);
+  if (browser) return scriptPage(request, row);
   if (!row) return new Response('Script not found', { status: 404, headers: TEXT_HEADERS });
   if (row.mode === 'key') {
     await audit(env, request, null, 'script.raw.stub', row.id, 'ok');
@@ -602,7 +660,57 @@ async function serveRaw(request, env, kind, value) {
   return new Response(object.body, { headers: { ...TEXT_HEADERS, 'content-disposition': contentDisposition(row.slug), 'x-script-sha256': row.sha256 } });
 }
 
+// IP별 키 검증 실패 횟수 관리. 테이블이 없어도(마이그레이션 전) 실행은 막지 않는다.
+async function keyRunBlocked(env, ip) {
+  if (!ip) return false;
+  try {
+    const row = await env.DB.prepare('SELECT blocked_until FROM key_run_failures WHERE ip = ?').bind(ip).first();
+    return !!row?.blocked_until && Date.parse(row.blocked_until) > Date.now();
+  } catch (error) {
+    console.error('Key run block check failed:', error);
+    return false;
+  }
+}
+
+async function recordKeyRunFailure(env, ip) {
+  if (!ip) return;
+  try {
+    const now = Date.now();
+    const row = await env.DB.prepare('SELECT fail_count, window_start FROM key_run_failures WHERE ip = ?').bind(ip).first();
+    const inWindow = row && Date.parse(row.window_start) > now - KEY_RUN_WINDOW_MS;
+    const count = inWindow ? row.fail_count + 1 : 1;
+    const windowStart = inWindow ? row.window_start : new Date(now).toISOString();
+    const locked = count >= KEY_RUN_FAIL_LIMIT;
+    const blockedUntil = locked ? new Date(now + KEY_RUN_BLOCK_MS).toISOString() : null;
+    await env.DB.prepare(
+      `INSERT INTO key_run_failures (ip, fail_count, window_start, blocked_until) VALUES (?,?,?,?)
+       ON CONFLICT(ip) DO UPDATE SET fail_count = excluded.fail_count, window_start = excluded.window_start, blocked_until = excluded.blocked_until`
+    ).bind(ip, locked ? 0 : count, locked ? new Date(now).toISOString() : windowStart, blockedUntil).run();
+  } catch (error) {
+    console.error('Key run failure record failed:', error);
+  }
+}
+
+async function clearKeyRunFailures(env, ip) {
+  if (!ip) return;
+  try {
+    await env.DB.prepare('DELETE FROM key_run_failures WHERE ip = ?').bind(ip).run();
+  } catch (error) {
+    console.error('Key run failure clear failed:', error);
+  }
+}
+
 async function keyRun(request, env, body) {
+  if (isBrowserRequest(request)) return plain('403 Forbidden', 403);
+  const ip = request.headers.get('cf-connecting-ip');
+  if (await keyRunBlocked(env, ip)) return fail(429, '검증 실패가 너무 많습니다. 10분 후 다시 시도하세요.');
+  const response = await keyRunCore(request, env, body);
+  if (response.status === 200) await clearKeyRunFailures(env, ip);
+  else if (response.status >= 400 && response.status < 500) await recordKeyRunFailure(env, ip);
+  return response;
+}
+
+async function keyRunCore(request, env, body) {
   if (!body || typeof body.slug !== 'string' || typeof body.key !== 'string') return fail(400, 'slug and key are required.');
   const script = await env.DB.prepare('SELECT * FROM hosted_scripts WHERE slug = ?').bind(normalizeSlug(body.slug)).first();
   if (!script || script.mode !== 'key') return fail(404, 'Script not found.');
@@ -629,7 +737,7 @@ async function keyRun(request, env, body) {
 
   const row = await env.DB.prepare(
     'SELECT id, user_id, status, expires_at, hwid FROM script_keys WHERE key_hash = ? AND script_id = ?'
-  ).bind(await sha256Hex(body.key), script.id).first();
+  ).bind(await sha256Hex(body.key.trim()), script.id).first();
   const valid = row && row.status === 'active' && !isExpired(row.expires_at);
   if (!valid) {
     await audit(env, request, null, 'script.key_run', script.id, 'denied');
@@ -852,7 +960,7 @@ async function issueScriptKey(request, env, auth, scriptId, body) {
   }
   const expiry = expiresFromDays(body?.expires_in_days);
   if (!expiry.ok) return fail(400, 'expires_in_days must be between 1 and 3650.');
-  const token = newSecret('skey_');
+  const token = newSecret('skey_', 32);
   const keyId = randomHex(12);
   await env.DB.prepare('INSERT INTO script_keys (id, script_id, user_id, key_hash, key_prefix, created_by, expires_at) VALUES (?,?,?,?,?,?,?)')
     .bind(keyId, script.id, holderId, await sha256Hex(token), token.slice(0, 12), actor.id, expiry.expiresAt).run();
