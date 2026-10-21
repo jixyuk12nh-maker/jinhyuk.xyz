@@ -1,5 +1,6 @@
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
-import { obfuscate, obfuscateBundle } from './obfuscator.js';
+import { obfuscate, obfuscateBundle, plainBundle, plainDecoyPart } from './obfuscator.js';
+import { withAutoSchema } from './autoschema.js';
 const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 const OBJECT_META = { httpMetadata: { contentType: 'text/plain; charset=utf-8', cacheControl: 'no-store' } };
 const ROLES = ['owner', 'admin', 'user'];
@@ -15,7 +16,7 @@ const USER_LIMIT = 10000;
 const MAX_FILES = 10;
 const BATCH_LIMIT = 300;
 const PROJECT_NAME_MAX = 60;
-const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, obfuscated, status, version, project_id, byte_size, sha256, served_sha256, created_at, updated_at, created_by';
+const SCRIPT_COLUMNS = 'id, slug, name, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, obfuscated, vm_obfuscate, status, version, project_id, byte_size, sha256, served_sha256, created_at, updated_at, created_by';
 
 const CORS_HEADERS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type' };
 const withCors = (response) => {
@@ -177,7 +178,7 @@ const safeUsername = (value) => {
   const v = String(value ?? '').trim();
   return /^[A-Za-z0-9_.-]{2,40}$/.test(v) ? v : null;
 };
-const maxBytes = (env) => Math.max(1024, Number(env.MAX_SCRIPT_BYTES || 524288));
+const maxBytes = (env) => Math.max(1024, Number(env.MAX_SCRIPT_BYTES || 41943040));
 const byteLength = (value) => new TextEncoder().encode(value).byteLength;
 const readBody = (request) => request.json().catch(() => null);
 const isExpired = (iso) => !!iso && Date.parse(iso) <= Date.now();
@@ -337,7 +338,8 @@ async function recordInvalidScriptKey(env, request, scriptId) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, rawEnv) {
+    const env = { ...rawEnv, DB: withAutoSchema(rawEnv.DB) };
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
@@ -854,7 +856,11 @@ async function banIp(request, env, auth, body) {
   if (!/^[0-9a-fA-F:.]{3,45}$/.test(ip)) return fail(400, 'Enter a valid IP address.');
   if (ip === request.headers.get('cf-connecting-ip')) return fail(409, '현재 접속 중인 IP는 차단할 수 없습니다.');
   const reason = safeName(body?.reason);
-  await env.DB.prepare('INSERT OR IGNORE INTO banned_ips (ip, reason) VALUES (?,?)').bind(ip, reason).run();
+  // 수동 차단은 영구 차단이다. 이미 자동 차단(72시간)된 IP 면 만료 시각을 지워 영구로 바꾼다 (이전엔 무시돼 72시간 뒤 풀렸다)
+  await env.DB.prepare(
+    `INSERT INTO banned_ips (ip, reason, expires_at, auto_ban) VALUES (?, ?, NULL, 0)
+     ON CONFLICT(ip) DO UPDATE SET reason = CASE WHEN excluded.reason <> '' THEN excluded.reason ELSE banned_ips.reason END, expires_at = NULL, auto_ban = 0`
+  ).bind(ip, reason).run();
   await audit(env, request, auth, 'ip.ban', ip, 'ok');
   return json({ ok: true, ip, reason }, 201);
 }
@@ -1101,8 +1107,11 @@ async function deliverKeyChunk(request, env, body) {
   const index = parseOrder(session.chunk_order)[body.seq];
   let piece;
   if (session.decoy) {
-    // 가짜 응답: 로드해도 아무 함수도 합치지 않는 같은 모양의 조각
-    piece = { chunk: DECOY_OBF, cf: fletcher(DECOY_OBF) };
+    // 가짜 응답: 로드해도 아무 함수도 합치지 않는 같은 모양의 조각.
+    // 난독화를 끈 스크립트는 평문 가짜 조각을 줘야 같은 형식이라 구분이 안 된다.
+    const row = await env.DB.prepare('SELECT vm_obfuscate FROM hosted_scripts WHERE id = ?').bind(session.script_id).first();
+    const chunk = row?.vm_obfuscate === 0 ? plainDecoyPart(index) : DECOY_OBF;
+    piece = { chunk, cf: fletcher(chunk) };
   } else {
     const script = await env.DB.prepare('SELECT object_key, served_sha256 FROM hosted_scripts WHERE id = ?').bind(session.script_id).first();
     if (!script?.object_key) return fail(404, 'Script content missing.');
@@ -1177,7 +1186,8 @@ function scriptOptions(body, current) {
     silent: boolInt(body.silent, current?.silent ?? 0),
     heartbeat: boolInt(body.heartbeat, current?.heartbeat ?? 1),
     lightweight: boolInt(body.lightweight, current?.lightweight ?? 0),
-    secure: boolInt(body.secure_loader, current?.secure_loader ?? 1)
+    secure: boolInt(body.secure_loader, current?.secure_loader ?? 1),
+    vm: boolInt(body.vm_obfuscate, current?.vm_obfuscate ?? 1)
   };
 }
 
@@ -1195,12 +1205,21 @@ async function obfuscateLua(env, code) {
     throw new HttpError(422, `난독화 실패: ${error.message}`);
   }
 }
-async function obfuscateLuaBundle(env, code) {
+// 입력이 클수록 가짜 코드 밀도를 낮춘다. Worker CPU 시간 제한 안에서 저장이 끝나도록 하는 예산이다 (100KB 기준 밀도 6은 약 12초).
+const densityFor = (bytes) => (bytes <= 64 * 1024 ? 6 : bytes <= 160 * 1024 ? 4 : 3);
+// vm=false 면 VM 없이 원문을 같은 조각 구조로만 묶는다 (정책: 스크립트별 선택)
+async function obfuscateLuaBundle(env, code, vm = true) {
+  if (!vm) return plainBundle(code);
   try {
-    return obfuscateBundle(code, {});
+    return obfuscateBundle(code, { density: densityFor(byteLength(code)) });
   } catch (error) {
     throw new HttpError(422, `난독화 실패: ${error.message}`);
   }
+}
+// 원문은 raw_object_key 에 있다. 0013 이전 스크립트는 raw 가 object_key 에 그대로 있다.
+async function readRawCode(env, row) {
+  const object = await env.BUCKET.get(row.raw_object_key || row.object_key);
+  return object ? object.text() : null;
 }
 
 async function putRaw(env, { scriptId, rawKey, rawCode, objectKey, digest }) {
@@ -1254,7 +1273,7 @@ async function createScript(request, env, auth, body) {
   let servedDigest;
   let bundle;
   try {
-    bundle = await obfuscateLuaBundle(env, body.code);
+    bundle = await obfuscateLuaBundle(env, body.code, opts.vm === 1);
     served = bundle.code;
     if (byteLength(served) > maxBytes(env)) throw new HttpError(413, `Obfuscated script exceeds ${maxBytes(env)} bytes.`);
     servedDigest = await bundleDigest(bundle);
@@ -1276,11 +1295,12 @@ async function createScript(request, env, auth, body) {
 
   try {
     await env.DB.prepare(
-      `INSERT INTO hosted_scripts (id, slug, name, object_key, raw_object_key, obfuscated, byte_size, sha256, served_sha256, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, project_id, status, version, created_by)
-       VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','v0.0.0.1',?)`
-    ).bind(id, slug, name, objectKey, rawKey, size, digest, servedDigest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, projectId, auth.user.id).run();
+      `INSERT INTO hosted_scripts (id, slug, name, object_key, raw_object_key, obfuscated, vm_obfuscate, byte_size, sha256, served_sha256, mode, key_policy, hwid_lock, silent, heartbeat, lightweight, secure_loader, project_id, status, version, created_by)
+       VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','v0.0.0.1',?)`
+    ).bind(id, slug, name, objectKey, rawKey, opts.vm, size, digest, servedDigest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, projectId, auth.user.id).run();
   } catch (error) {
-    await purgeObjects(env, [objectKey, rawKey]);
+    // 번들 조각·매니페스트·엔진·로더도 putObfuscated 에서 이미 썼으므로 함께 지운다 (이전엔 빠져서 R2에 고아 객체가 남았다)
+    await purgeObjects(env, [...allBundleKeys(objectKey), rawKey]);
     throw error;
   }
   await audit(env, request, auth, 'script.create', id, 'ok');
@@ -1313,23 +1333,28 @@ async function updateScript(request, env, auth, id, body) {
   }
   const changed = name !== current.name || mode !== current.mode || policy !== current.key_policy || slug !== current.slug
     || opts.hwid !== current.hwid_lock || opts.silent !== current.silent || opts.heartbeat !== current.heartbeat
-    || opts.lightweight !== current.lightweight || opts.secure !== current.secure_loader || digest !== current.sha256;
+    || opts.lightweight !== current.lightweight || opts.secure !== current.secure_loader || opts.vm !== current.vm_obfuscate
+    || digest !== current.sha256;
+  // 코드가 바뀌거나 VM 난독화 설정이 바뀌면 저장된 원문으로 번들을 다시 만든다 (설정만 바꿔도 적용되도록)
+  const rebuild = newCode !== null || opts.vm !== current.vm_obfuscate;
   const oldObjectKey = current.object_key;
   const oldRawKey = current.raw_object_key;
   let objectKey = oldObjectKey;
   let rawKey = oldRawKey;
   let obfuscated = current.obfuscated;
-  if (newCode !== null) {
+  if (rebuild) {
+    const source = newCode ?? await readRawCode(env, current);
+    if (source === null) return fail(404, 'Script content missing.');
     const suffix = randomHex(6);
     ({ objectKey, rawKey } = await scriptObjectKeys(env, current.created_by, id, suffix));
     obfuscated = 1;
 
-    await putRaw(env, { scriptId: id, rawKey, rawCode: newCode, objectKey, digest });
+    await putRaw(env, { scriptId: id, rawKey, rawCode: source, objectKey, digest });
 
     let served;
     let bundle;
     try {
-      bundle = await obfuscateLuaBundle(env, newCode);
+      bundle = await obfuscateLuaBundle(env, source, opts.vm === 1);
       served = bundle.code;
       if (byteLength(served) > maxBytes(env)) throw new HttpError(413, `Obfuscated script exceeds ${maxBytes(env)} bytes.`);
       servedDigest = await bundleDigest(bundle);
@@ -1353,15 +1378,15 @@ async function updateScript(request, env, auth, id, body) {
   const status = changed || current.status !== 'ACTIVE' ? 'ACTIVE' : current.status;
   try {
     await env.DB.prepare(
-      `UPDATE hosted_scripts SET object_key = ?, raw_object_key = ?, obfuscated = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, served_sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
-    ).bind(objectKey, rawKey, obfuscated, slug, name, size, digest, servedDigest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
+      `UPDATE hosted_scripts SET object_key = ?, raw_object_key = ?, obfuscated = ?, vm_obfuscate = ?, slug = ?, name = ?, byte_size = ?, sha256 = ?, served_sha256 = ?, mode = ?, key_policy = ?, hwid_lock = ?, silent = ?, heartbeat = ?, lightweight = ?, secure_loader = ?, status = ?, version = ?, updated_at = ${NOW_SQL} WHERE id = ?`
+    ).bind(objectKey, rawKey, obfuscated, opts.vm, slug, name, size, digest, servedDigest, mode, policy, opts.hwid, opts.silent, opts.heartbeat, opts.lightweight, opts.secure, status, version, id).run();
   } catch (error) {
     if (objectKey !== oldObjectKey) await purgeObjects(env, [...allBundleKeys(objectKey), rawKey]);
     throw error;
   }
   if (objectKey !== oldObjectKey) await purgeObjects(env, [...allBundleKeys(oldObjectKey), oldRawKey].filter(Boolean));
   // 코드는 그대로인데 URL 이름만 바뀌면 로더 안의 slug 만 갱신한다
-  if (newCode === null && slug !== current.slug) await putLoader(env, objectKey, slug, new URL(request.url).origin);
+  if (!rebuild && slug !== current.slug) await putLoader(env, objectKey, slug, new URL(request.url).origin);
   await audit(env, request, auth, 'script.update', id, 'ok');
   return json({ ok: true, script: scriptView(await getScriptRow(env, id)), raw_url: publicUrl(new URL(request.url).origin, slug) });
 }

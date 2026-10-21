@@ -1556,7 +1556,7 @@ function runtimeSource(OP, KEY, KX, KY) {
     for i = 1, #s, 4 do
       local c1, c2, c3, c4 = string.byte(s, i, i + 3)
       local v = MAPV[c1] + MAPV[c2] * 64 + MAPV[c3] * 4096 + MAPV[c4] * 262144
-      local x = (n * 2654435761 + sl) % 8388608
+      local x = ((n % 1048576) * 2654435761 + sl + math.floor(n / 1048576) * 1013904223) % 8388608
       x = (x * x + KEY) % 8388608
       x = (x + prev * 131) % 8388608
       local plain = bxor(v, x)
@@ -1666,7 +1666,7 @@ function runtimeSource(OP, KEY, KX, KY) {
   end
   -- 함수 원형을 처음 쓸 때 한 번만 푼다: 명령 블롭, 상수, 업밸류 기술자
   local function ks(sl, n)
-    local x = (n * 2654435761 + sl) % 8388608
+    local x = ((n % 1048576) * 2654435761 + sl + math.floor(n / 1048576) * 1013904223) % 8388608
     return (x * x + KEY) % 8388608
   end
   -- Fletcher 류 체크섬 (mod 65521). st = {a, b}, 값은 0 이상 2^24 미만 정수
@@ -1828,15 +1828,20 @@ function shuffleBlocks(code) {
 // 가짜 코드를 무작위로 끼워 넣는다. 점프 대상은 원래 명령을 가리키도록 다시 매긴다.
 //  - 가짜 NOP: 그냥 끼워 넣음 (실행되며 아무 일도 안 함)
 //  - 죽은 블록: JMP로 건너뛰는 가짜 NOP 묶음 (실행 흐름에서는 절대 안 닿음, 정적 분석 노이즈)
-// density: 0(끔) ~ 3(강함). 명령 하나 앞에 넣을 확률과 개수를 정한다.
+// density: 0(끔) ~ 6(최대). 표에 없는 값은 허용하지 않는다. 명령 하나 앞에 넣을 확률과 개수를 정한다.
+// nop, dead 는 명령 하나 앞에 넣을 확률(%). 값이 클수록 가짜 코드가 많다.
 const DENSITY = {
   0: { nop: 0, dead: 0 },
-  1: { nop: 4, dead: 6 },
-  2: { nop: 3, dead: 4 },
-  3: { nop: 2, dead: 3 },
+  1: { nop: 20, dead: 14 },
+  2: { nop: 25, dead: 20 },
+  3: { nop: 33, dead: 25 },
+  4: { nop: 50, dead: 40 },
+  5: { nop: 70, dead: 60 },
+  6: { nop: 90, dead: 80 },
 };
 function insertDecoys(code, density, consts) {
-  const cfg = DENSITY[density] ?? DENSITY[2];
+  if (!(density in DENSITY)) throw new Error("density 는 0~6");
+  const cfg = DENSITY[density];
   const newIdx = new Array(code.length + 1);
   const out = [];
   // 죽은 값: NOP 또는 스택에 값을 올렸다 바로 버리는 쌍 (스택 효과 0이라 실행 결과가 같다)
@@ -1869,7 +1874,7 @@ function insertDecoys(code, density, consts) {
     }
   };
   code.forEach((ins, i) => {
-    if (cfg.dead && randInt(0, cfg.dead) === 0) {
+    if (randInt(0, 100) < cfg.dead) {
       if (randInt(0, 1) === 0) {
         // 죽은 블록: JMP는 블록 끝을 가리키고, 사이의 NOP은 절대 실행되지 않는다
         const jmp = { op: 'JMP', a: 0, b: 0, decoy: true };
@@ -1884,7 +1889,7 @@ function insertDecoys(code, density, consts) {
         jmp.a = out.length;
       }
     }
-    if (cfg.nop && randInt(0, cfg.nop) === 0) junk(randInt(1, 3));
+    if (randInt(0, 100) < cfg.nop) junk(randInt(1, 3));
     newIdx[i] = out.length;
     out.push({ ...ins });
   });
@@ -1896,11 +1901,104 @@ function insertDecoys(code, density, consts) {
 }
 
 // 런타임 안의 지역 변수 이름을 빌드마다 무작위로 바꾼다. 전역(error, select, table 등)과 테이블 필드(.c, .k 등)는 건드리지 않는다.
-const RENAME_LOCALS = ['KEY', 'G', 'C', 'K', 'L', 'S', 'sp', 'RP', 'V', 'U', 'U2', 'P', 'PR', 'pc', 'op', 'ki', 'idx',
+const RENAME_LOCALS = ['H', 'KEY', 'G', 'C', 'K', 'L', 'S', 'sp', 'RP', 'V', 'U', 'U2', 'P', 'PR', 'pc', 'op', 'ki', 'idx',
   'a', 'b', 'c', 'v', 'x', 'y', 's', 'i', 'j', 'k', 't', 'f', 'pk', 'src', 'obj', 'lim', 'st', 'proto', 'fl', 'ix',
   'ctl', 'out', 'r', 'p', 'push', 'pop', 'pack', 'dec', 'bxor', 'exec', 'BIN', 'UN', 'i0', 'l0', 's0', 'unblob',
   'fold', 'chkk', 'chkcode', 'prep', 'ks', 'kb', 'j', 'fa', 'fb', 'hdr1', 'hdr2', 'hdr3', 'hdr4', 'Up', 'es',
   'prev', 'plain', 'PM', 'GF0', 'trap', 'envcheck', 'timecheck', 'tchk', 'dbg', 'acc', 't0'];
+// 서로 다른 난수 n개 (lo 이상 hi 미만)
+function randomDistinct(n, lo, hi) {
+  const seen = new Set();
+  const out = [];
+  while (out.length < n) {
+    const v = randInt(lo, hi);
+    if (!seen.has(v)) { seen.add(v); out.push(v); }
+  }
+  return out;
+}
+
+// 런타임 헬퍼 함수는 정수 키 테이블 H[k] 를 거쳐 부른다. 키는 빌드마다 다르다 (이름만 바꾸는 것보다 구조가 달라진다).
+const HELPER_FNS = ['pack', 'unb64', 'dec', 'unblob', 'split', 'join', 'idiv', 'b32', 'bitw', 'bnot', '_dead',
+  'ks', 'fold', 'trap', 'envcheck', 'timecheck', 'chkk', 'chkcode', 'prep'];
+// 단어 단위 치환. 문자열과 -- 주석은 건너뛰고, 필드(.name, :name)는 바꾸지 않는다.
+function mapWords(src, fn) {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '-' && src[i + 1] === '-') {
+      const end = src.indexOf('\n', i);
+      const stop = end < 0 ? src.length : end;
+      out += src.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      while (j < src.length && src[j] !== ch) j += src[j] === '\\' ? 2 : 1;
+      out += src.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(ch) && !/[A-Za-z0-9_]/.test(src[i - 1] || '')) {
+      let j = i;
+      while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
+      const word = src.slice(i, j);
+      const prev = src[i - 1] || '';
+      const prev2 = src[i - 2] || '';
+      const isField = prev === ':' || (prev === '.' && prev2 !== '.');
+      out += isField ? word : fn(word);
+      i = j;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+// 런타임 텍스트를 빌드마다 바꾼다: 헬퍼를 H[k] 로 간접화하고, 쓸모없는 do 블록을 섞는다. 결과는 여전히 Lua 5.1이다.
+// 런타임의 주석(설계 설명)을 지운다. 문자열 리터럴 안의 -- 는 건드리지 않는다.
+function stripComments(src) {
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === "\"" || ch === "\x27") {
+      let j = i + 1;
+      while (j < src.length && src[j] !== ch) j += src[j] === "\\" ? 2 : 1;
+      out += src.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (ch === "-" && src[i + 1] === "-") {
+      const end = src.indexOf("\n", i);
+      i = end < 0 ? src.length : end;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out.split("\n").filter((l) => l.trim() !== "").join("\n");
+}
+function hardenRuntime(src) {
+  const slots = {};
+  src = stripComments(src);
+  const keys = randomDistinct(HELPER_FNS.length, 1000, 9000000);
+  HELPER_FNS.forEach((n, i) => { slots[n] = keys[i]; });
+  let out = src;
+  for (const n of HELPER_FNS) {
+    out = out.replace(new RegExp(`local function ${n}\\(`), `H[${slots[n]}] = function(`);
+  }
+  out = mapWords(out, (w) => (Object.prototype.hasOwnProperty.call(slots, w) ? `H[${slots[w]}]` : w));
+  const lines = out.split('\n').map((line) => {
+    if (/^  H\[\d+\] = function\(/.test(line) && randInt(0, 2) === 0) {
+      return `  do local _q = ${randInt(1, 9999)} * ${randInt(1, 99)} % ${randInt(2, 97)} end\n${line}`;
+    }
+    return line;
+  });
+  return 'local H = {}\n' + lines.join('\n');
+}
+
 function makeNames() {
   const used = new Set();
   const names = {};
@@ -1957,9 +2055,11 @@ function fletcher(parts) {
 export function obfuscateDetailed(src, opts = {}) {
   const { protos, dialect } = compileAuto(utf8ToLatin1(src), opts.dialect ?? 'auto');
 
-  const pool = shuffle(Array.from({ length: 254 }, (_, i) => i + 1));
+  // 명령 id 는 빌드마다 무작위 큰 값이다. 디스패치의 비교 상수가 1..40 같은 작은 수로 드러나지 않게 한다.
+  const ids = randomDistinct(OPNAMES.length, 1000, 8000000);
   const OP = {};
-  OPNAMES.forEach((name, i) => { OP[name] = pool[i]; });
+  const OPIDX = {};
+  OPNAMES.forEach((name, i) => { OP[name] = ids[i]; OPIDX[name] = i; });
   const KEY = randInt(1, 0x7fffff);
   const KX = randInt(1, 0x7fffff);
   const KY = (KEY ^ KX) >>> 0;
@@ -1967,7 +2067,7 @@ export function obfuscateDetailed(src, opts = {}) {
   const names = makeNames();
   // 값 키 스트림: 값 번호 n과 함수 소금 sl로 비선형 키를 만든다. runtime의 unblob과 같은 식이어야 한다.
   const ksAt = (sl, n) => {
-    let x = (n * 2654435761 + sl) % 8388608;
+    let x = ((n % 1048576) * 2654435761 + sl + Math.floor(n / 1048576) * 1013904223) % 8388608;
     x = (x * x + KEY) % 8388608;
     return x;
   };
@@ -2005,13 +2105,13 @@ export function obfuscateDetailed(src, opts = {}) {
     const flat = [];
     const code = insertDecoys(shuffleBlocks(p.code), opts.density ?? 3, p.consts);
     // 함수마다 명령 번호를 다시 섞는다 (proto별 순열). 런타임은 pm 표로 원래 번호를 복원한다.
-    const perm = shuffle(Array.from({ length: 254 }, (_, i) => i + 1)); // perm[원래번호-1] = 저장 번호
-    const inv = new Array(254);
-    perm.forEach((e, i) => { inv[e - 1] = i + 1; }); // inv[저장 번호-1] = 원래 번호
+    const perm = shuffle(Array.from({ length: OPNAMES.length }, (_, i) => i + 1)); // perm[명령 인덱스] = 저장 번호
+    const inv = new Array(OPNAMES.length);
+    perm.forEach((e, i) => { inv[e - 1] = ids[i]; }); // inv[저장 번호-1] = 명령 id (런타임 디스패치 비교 값)
     code.forEach((ins) => {
-      flat.push(perm[OP[ins.op] - 1], ins.a, ins.b);
+      flat.push(perm[OPIDX[ins.op]], ins.a, ins.b);
     });
-    if (flat.length >= 1048576) throw new Error('함수가 너무 큼 (명령 값 1048576개 이상)');
+    if (flat.length >= 16777216) throw new Error('함수가 너무 큼 (명령 값 16777216개 이상)');
     // 연쇄 암호화: n번째 키는 (n번 키 스트림 + 앞 명령 평문 * 131) mod 2^23. 한 칸만 고치면 뒤가 전부 깨진다.
     let blob = '';
     let prevPlain = 0;
@@ -2056,7 +2156,7 @@ export function obfuscateDetailed(src, opts = {}) {
       + `hc = ${hEnc(hc)}, hk = ${hEnc(hkv)}, cs = ${hEnc(checkStride)}, cn = 0, pm = { ${inv.join(', ')} } } end)()`;
   });
 
-  const runtimeText = renameLocals(runtimeSource(OP, KEY, KX, KY), names);
+  const runtimeText = renameLocals(hardenRuntime(runtimeSource(OP, KEY, KX, KY)), names);
   const code = [
     `local ${name} = (function(${names.PR})`,
     runtimeText,
@@ -2111,4 +2211,38 @@ export function obfuscateBundle(src, opts = {}) {
   const bad = validateLua51(engine);
   if (bad) throw new Error('내부 오류: 엔진이 Lua 5.1 문법이 아님 — ' + bad);
   return { code: r.code, engine, parts, count: r.lits.length };
+}
+
+// 난독화 끄기 묶음: VM 없이 원문 바이트를 같은 6조각 구조로 나눈다.
+// 조각 i 는 { [i+1] = "바이트" } 를 돌려주는 청크이고, 엔진은 조각을 이어 붙여 원문을 로드한다.
+// 로더·조각 검증(순서, fletcher, sha256) 프로토콜은 VM 묶음과 완전히 같다.
+const PLAIN_PARTS = 6;
+const PLAIN_ENGINE = `return function(PR)
+  local t = {}
+  for i = 1, ${PLAIN_PARTS} do t[i] = PR[i] end
+  local f, err = loadstring(table.concat(t))
+  if not f then error(err, 0) end
+  return f
+end
+`;
+// 바이트 배열을 ASCII만 쓰는 Lua 문자열 리터럴로 바꾼다 (\ddd 이스케이프, 어떤 바이트도 안전)
+function luaByteLiteral(bytes) {
+  let out = '"';
+  for (const b of bytes) {
+    out += b >= 32 && b <= 126 && b !== 34 && b !== 92 ? String.fromCharCode(b) : '\\' + String(b).padStart(3, '0');
+  }
+  return out + '"';
+}
+export function plainPart(index, bytes) {
+  return `return {[${index + 1}]=${luaByteLiteral(bytes)}}\n`;
+}
+// 가짜 응답용 평문 조각: 이어 붙이면 빈 청크가 되어 실행해도 아무 일도 없다
+export function plainDecoyPart(index) {
+  return `return {[${index + 1}]=""}\n`;
+}
+export function plainBundle(src) {
+  const bytes = new TextEncoder().encode(src);
+  const size = Math.ceil(bytes.length / PLAIN_PARTS);
+  const parts = Array.from({ length: PLAIN_PARTS }, (_, i) => plainPart(i, bytes.subarray(i * size, (i + 1) * size)));
+  return { code: src, engine: PLAIN_ENGINE, parts, count: 0 };
 }
