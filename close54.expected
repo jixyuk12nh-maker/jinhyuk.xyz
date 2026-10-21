@@ -1,0 +1,13 @@
+10
+body
+close b
+close a
+close c
+ret
+close d 1
+close d 2
+n 1
+nilok
+close g 1
+close g 2
+u 3
