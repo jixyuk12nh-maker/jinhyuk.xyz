@@ -10,19 +10,19 @@ const USAGE = `사용법:
 옵션:
   -o, --out <경로>   출력 파일 또는 폴더
   --check            출력 없이 VM/원문 구간 수만 보고
-  --density <0-3>    가짜 명령과 죽은 블록 밀도 (0 끔, 3 기본 = 최대)
+  --density <0-6>    가짜 명령과 죽은 블록 밀도 (0 끔, 6 기본 = 최대)
   --dialect <이름>   auto(기본: 5.1→5.2→5.3→5.4→luau→mixed 순으로 처음 통과하는 방언), 5.1, 5.2, 5.3, 5.4, luau, mixed
   -h, --help         도움말`;
 
 function parseArgs(argv) {
-  const opts = { input: null, out: null, check: false, help: false, density: 3, dialect: 'auto' };
+  const opts = { input: null, out: null, check: false, help: false, density: 6, dialect: "auto" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '--check') opts.check = true;
     else if (a === '--density') {
       opts.density = Number(argv[++i]);
-      if (!Number.isInteger(opts.density) || opts.density < 0 || opts.density > 3) throw new Error('--density 는 0~3 정수');
+      if (!Number.isInteger(opts.density) || opts.density < 0 || opts.density > 6) throw new Error('--density 는 0~6 정수');
     }
     else if (a === '--dialect') {
       opts.dialect = argv[++i];
