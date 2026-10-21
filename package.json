@@ -10,9 +10,10 @@
     "db:migrate:remote": "wrangler d1 migrations apply tm-db --remote",
     "owner:create": "node scripts/create-owner.mjs",
     "obfuscate": "node scripts/obfuscate.mjs",
-    "test": "node --test tests/obfuscator.test.mjs tests/lua51-syntax.test.mjs tests/dialects.test.mjs tests/lua54.test.mjs tests/lua51-fenv.test.mjs tests/mixed-dialect.test.mjs tests/tamper.test.mjs tests/delivery.test.mjs tests/bundle.test.mjs tests/loader-e2e.test.mjs tests/r2-layout.test.mjs",
+    "test": "node --test tests/obfuscator.test.mjs tests/lua51-syntax.test.mjs tests/dialects.test.mjs tests/lua54.test.mjs tests/lua51-fenv.test.mjs tests/mixed-dialect.test.mjs tests/tamper.test.mjs tests/delivery.test.mjs tests/bundle.test.mjs tests/plain.test.mjs tests/autoschema.test.mjs tests/loader-e2e.test.mjs tests/r2-layout.test.mjs",
     "check": "node --check src/worker.js && node --check src/obfuscator.js && node --check public/app.js && node --check scripts/create-owner.mjs && node --check scripts/obfuscate.mjs",
-    "fuzz": "node tests/fuzz.mjs"
+    "fuzz": "node tests/fuzz.mjs",
+    "schema:build": "node --no-warnings scripts/build-schema.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

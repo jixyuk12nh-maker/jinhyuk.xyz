@@ -28,6 +28,8 @@ API 키는 앱사이트 로그인용이며, **계정(사용자)마다** 발급�
 
 ## 난독화 (스크립트 저장 시 자동 적용)
 스크립트를 저장하면 `src/obfuscator.js`의 내장 VM 난독화기가 원문을 바이트코드 VM 코드로 바꿉니다.
+- 가짜 코드 밀도는 입력 크기에 따라 정해진다 (64KB 이하 6, 160KB 이하 4, 그 이상 3). CLI 기본값은 6.
+- 스크립트마다 **VM Obfuscation** 체크로 끌 수 있습니다 (API: `vm_obfuscate: false`, 마이그레이션 0020). 끄면 원문 그대로 저장·서빙하며, 키 모드는 같은 6조각 전송·검증을 거칩니다. 설정만 바꿔도 저장된 원문으로 번들을 다시 만듭니다.
 - 원문: R2의 `scripts/<id>.raw.lua` (작성자와 소유자의 `POST /api/execute`에서만 나옴)
 - 난독화본: R2의 `scripts/<id>.lua` (로드스트링, 키 모드 검증 응답)
 
@@ -126,7 +128,7 @@ npm test
    `npx wrangler d1 execute tm-db --remote --command "SELECT name FROM sqlite_master WHERE type='table';"`
 2. D1을 백업한 뒤 마이그레이션을 적용합니다. (0011은 더 이상 쓰지 않는 `key_run_failures` 테이블을 삭제합니다.)
    `npm run db:migrate:remote`
-3. 배포합니다.
+3. 배포합니다. (0020 `vm_obfuscate` 컬럼 추가 포함)
    `npm run check && npm run deploy`
 
 ## 최초 소유자 만들기
@@ -177,7 +179,7 @@ Key-protected scripts now use a six-chunk delivery flow. The Worker creates a 12
 This raises extraction difficulty but is not DRM: a client that receives and executes Lua code can still dump or reconstruct it. Use server-side logic for sensitive decisions and rotate/revoke exposed keys.
 
 ## 난독화 강도와 검증 (VM 강화 버전)
-- 밀도: `obfuscate(src, { density })` 또는 CLI `--density 0~3` (0 끔, 3 기본). 가짜 NOP, 점프로 건너뛰는 죽은 블록, 불투명 술어 블록을 넣는다. 기본 블록은 무작위 순서로 배치된다.
+- 밀도: `obfuscate(src, { density })` 또는 CLI `--density 0~6` (0 끔, 6 기본 = 최대). 가짜 NOP, 점프로 건너뛰는 죽은 블록, 불투명 술어 블록을 넣는다. 기본 블록은 무작위 순서로 배치된다.
 - 명령 블롭: 명령 값은 값마다 다른 비선형 키 스트림으로 가려져 있고, 로드 때 한 번만 푼다. 출력에 평문 숫자 배열이 없다.
 - 상수: 문자열과 숫자 상수는 상수마다 다른 키로 가린다. 런타임 지역 변수 이름은 빌드마다 무작위다.
 - 한계: 런타임이 스크립트 안에 같이 들어가므로 충분한 시간이면 복원 가능하다. 에러 메시지의 줄 번호는 난독화본 기준이다. 안티 변조 블록(`antitamper.js`)은 원문 그대로 붙는다.
