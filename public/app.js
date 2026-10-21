@@ -5,7 +5,7 @@
   const root = document.documentElement;
   const clamp = (v) => Math.min(Math.max(v, 0), 1);
   const KEY_PLACEHOLDER = '여기에_스크립트_키';
-  const DEFAULT_OPTS = { free: true, silent: false, heartbeat: true, light: false, secure: true, hwid: false };
+  const DEFAULT_OPTS = { free: true, silent: false, heartbeat: true, light: false, secure: true, hwid: false, vm: true };
   const SCRIPT_LIMIT = 18;
   const KEY_LIMIT = 10000;
   const TOKEN_KEY = 'jinhyuk-api-key';
@@ -744,7 +744,7 @@
     $('scriptCode').value = '';
     loadedCode = null;
     const opts = s
-      ? { free: s.mode === 'keyless', silent: !!s.silent, heartbeat: !!s.heartbeat, light: !!s.lightweight, secure: !!s.secure_loader, hwid: !!s.hwid_lock }
+      ? { free: s.mode === 'keyless', silent: !!s.silent, heartbeat: !!s.heartbeat, light: !!s.lightweight, secure: !!s.secure_loader, hwid: !!s.hwid_lock, vm: s.vm_obfuscate !== 0 }
       : { ...DEFAULT_OPTS };
     $('scriptModal').querySelectorAll('[data-opt]').forEach((b) => { b.checked = !!opts[b.dataset.opt]; });
     renderFiles();
@@ -786,7 +786,8 @@
       heartbeat: opts.heartbeat,
       lightweight: opts.light,
       secure_loader: opts.secure,
-      hwid_lock: opts.hwid
+      hwid_lock: opts.hwid,
+      vm_obfuscate: opts.vm
     };
     busy = true;
     setBusy(button, true, 'SAVE SCRIPT');
