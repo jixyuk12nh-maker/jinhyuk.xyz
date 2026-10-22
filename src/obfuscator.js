@@ -1,6 +1,3 @@
-// Lua 5.1 / 5.2 / 5.3 / Luau 문법을 지원하는 VM 난독화기 (방언은 opts.dialect, 기본 auto).
-// 원문을 토큰 → AST로 파싱한 뒤, 함수 단위 스택 VM 바이트코드로 컴파일한다.
-// 출력에는 원문 구간이 남지 않는다.
 
 import { ANTI_TAMPER_SRC } from './antitamper.js';
 const randInt = (min, max) => {
@@ -34,32 +31,25 @@ const BIN_ID = new Map([['+', 1], ['-', 2], ['*', 3], ['/', 4], ['..', 5], ['=='
   ['<', 8], ['<=', 9], ['>', 10], ['>=', 11], ['%', 12], ['^', 13]]);
 const UN_ID = new Map([['-', 1], ['not', 2], ['#', 3]]);
 
-// 방언별 기능 플래그. 기본값은 Lua 5.1.
-//  goto: goto/라벨 (5.2+)   bitops: 정수 연산자 // & | ~ << >> (5.3)   luau: Luau 문법 (타입, 복합 대입, continue, if-식)
-//  esc: \x  zesc: \z  uesc: \u{...}   hexf: 16진 실수 표기 (5.2+)
 const DIALECTS = {
   '5.1': { name: '5.1', goto: false, bitops: false, luau: false, esc: false, zesc: false, uesc: false, hexf: false },
   '5.2': { name: '5.2', goto: true, bitops: false, luau: false, esc: true, zesc: true, uesc: false, hexf: true },
   '5.3': { name: '5.3', goto: true, bitops: true, luau: false, esc: true, zesc: true, uesc: true, hexf: true },
   '5.4': { name: '5.4', goto: true, bitops: true, luau: false, esc: true, zesc: true, uesc: true, hexf: true, attribs: true },
   luau: { name: 'luau', goto: false, bitops: false, luau: true, esc: true, zesc: false, uesc: true, hexf: false },
-  // 혼합: Luau 문법 + 5.3 정수 연산 + 5.4 속성 + goto. 방언이 섞인 원문(예: `//` 와 `+=` 동시 사용)을 받는다.
   // 어느 한 방언으로도 통과하지 못했을 때만 쓰인다 (auto의 마지막 단계).
   mixed: { name: 'mixed', goto: true, bitops: true, luau: true, esc: true, zesc: false, uesc: true, hexf: true, attribs: true },
 };
 const KW_GOTO = new Set([...KEYWORDS, 'goto']);
 const KW_LUAU = new Set([...KEYWORDS, 'continue']);
 const KW_MIXED = new Set([...KEYWORDS, 'goto', 'continue']);
-// 5.3 연산자 우선순위 (값이 클수록 강하게 묶인다). 5.3 매뉴얼 기준.
 const BINPREC53 = new Map([['or', 1], ['and', 2], ['<', 3], ['<=', 3], ['>', 3], ['>=', 3], ['==', 3], ['~=', 3],
   ['|', 4], ['~', 5], ['&', 6], ['<<', 7], ['>>', 7], ['..', 8], ['+', 9], ['-', 9],
   ['*', 10], ['/', 10], ['//', 10], ['%', 10], ['^', 13]]);
 const UNARY_PREC53 = 11;
 const BIN_ID53 = new Map([['//', 14], ['&', 15], ['|', 16], ['~', 17], ['<<', 18], ['>>', 19]]);
 const UN_ID53 = new Map([['~', 4]]);
-// Luau 복합 대입 연산자 → 대응하는 이항 연산자
 const COMPOUND = new Map([['+=', '+'], ['-=', '-'], ['*=', '*'], ['/=', '/'], ['%=', '%'], ['^=', '^'], ['..=', '..']]);
-// UTF-8 인코딩 (5.3처럼 2^31 미만까지). 결과는 바이트 하나당 문자 하나인 문자열
 function utf8Bytes(cp) {
   if (cp < 0x80) return String.fromCharCode(cp);
   const bytes = [];
@@ -73,8 +63,6 @@ function utf8Bytes(cp) {
   bytes.unshift(((~limit << 1) & 0xff) | rest);
   return String.fromCharCode(...bytes);
 }
-
-// ───────────── 어휘 분석 ─────────────
 
 function longBracket(src, i) {
   if (src[i] !== '[') return null;
@@ -95,8 +83,6 @@ function readLong(src, start, lvl) {
   return { content, next: end + close.length };
 }
 
-// Lua 5.1 이스케이프: \a\b\f\n\r\t\v, \ddd(10진 3자리), \<줄바꿈>, 그 밖의 문자는 그 문자 자체
-// (\x, \z 같은 5.2 이후 이스케이프는 없다)
 function readEscape(src, j, dl) {
   const c = src[j + 1];
   if (c === undefined) throw new Error('unfinished string');
@@ -134,12 +120,9 @@ function readEscape(src, j, dl) {
   return { ch: c, next: j + 2 };
 }
 
-// Lua 5.1 숫자 표기 검증 (strtod + 16진 정수 규칙). 10진: 1, 1.5, .5, 1e5, 1.e5 / 16진: 0xFF, 0x1p4
 // 5.1 숫자: 10진 실수와 16진 정수만. 16진 실수(0x1p4)는 C strtod 확장이라 Luau와 맞추기 위해 거부한다.
 const isLuaNumeral = (t) => /^(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(t) || /^0[xX][0-9a-fA-F]+$/.test(t);
 
-// 5.2/5.3 숫자 표기 검증: 10진은 5.1과 같고, 16진 정수/실수(0x1.8p3)를 허용한다
-// 16진 실수 값 계산 (0x1.8p3 → 12). 결과는 10진 표기로 내보내 5.1/Luau 문법에 맞춘다.
 function hexFloatValue(text) {
   const m = /^0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?\d+))?$/.exec(text);
   let v = 0;
@@ -180,7 +163,6 @@ function tokenize(src, dl = DIALECTS['5.1']) {
     }
     if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] ?? ''))) {
       if (dl.luau) {
-        // Luau 숫자: 0b 2진수, 0x 16진수, 자릿수 사이의 _, 10진 지수. 0b와 _는 여기서 10진 문자열로 바꾼다.
         let j = i;
         if (/^0[bB]/.test(src.slice(i, i + 2))) { j = i + 2; while (j < n && /[01_]/.test(src[j])) j++; }
         else if (/^0[xX]/.test(src.slice(i, i + 2))) { j = i + 2; while (j < n && /[0-9a-fA-F_]/.test(src[j])) j++; }
@@ -202,11 +184,9 @@ function tokenize(src, dl = DIALECTS['5.1']) {
         i = j;
         continue;
       }
-      // Lua 5.1 llex.c read_numeral과 같은 범위: 숫자/점, 지수 부호, 그 뒤 영숫자와 _ 를 모두 묶은 다음 검증한다
       let j = i + 1;
       const isHex = /^0[xX]/.test(src.slice(i, i + 2));
       if (dl.hexf || isHex) {
-        // 5.2/5.3 read_numeral: 16진이면 지수 문자는 p/P, 10진이면 e/E. 지수 뒤 부호는 함께 묶는다
         const expo = isHex ? 'pP' : 'eE';
         while (j < n) {
           if (expo.includes(src[j]) && (src[j + 1] === '+' || src[j + 1] === '-')) { j += 2; continue; }
@@ -235,7 +215,6 @@ function tokenize(src, dl = DIALECTS['5.1']) {
       }
     }
     if (c === '`' && dl.luau) {
-      // Luau 보간 문자열: 조각은 {s}, {src: 식 원문}으로 나눠 토큰에 담는다. 식은 파서가 다시 읽는다.
       const parts = [];
       let buf = '';
       let j = i + 1;
@@ -291,6 +270,7 @@ function tokenize(src, dl = DIALECTS['5.1']) {
     if (dl.luau && src.slice(i, i + 3) === '..=') { push({ t: '..=' }, i, i + 3); i += 3; continue; }
     const two = src.slice(i, i + 2);
     if (twoOps.includes(two)) { push({ t: two }, i, i + 2); i += 2; continue; }
+    if (c.charCodeAt(0) >= 0x80) throw new Error(`line ${lineAt(i)}: 허용되지 않은 문자 (\\x${c.charCodeAt(0).toString(16)}): 식별자는 ASCII 문자만 쓸 수 있습니다`);
     push({ t: c }, i, i + 1);
     i++;
   }
@@ -298,15 +278,43 @@ function tokenize(src, dl = DIALECTS['5.1']) {
   return toks;
 }
 
-// ───────────── 구문 분석 (AST) ─────────────
-
 // continue(Luau)와 goto 라벨에 쓰는 내부 이름. 사용자 식별자로는 나올 수 없는 문자를 쓴다.
 const CONT = '\0continue';
 
-function parse(src, dl = DIALECTS['5.1']) {
+const STAT_KW = new Set(['local', 'function', 'if', 'for', 'while', 'do', 'repeat', 'return', 'break', 'goto']);
+// 블록/괄호 깊이 스택을 토큰 하나만큼 갱신한다. 짝이 맞지 않으면 false.
+function blockStep(stack, t) {
+  if (t === 'function' || t === 'if' || t === 'repeat') stack.push(t);
+  else if (t === 'while' || t === 'for') stack.push('loop');
+  else if (t === 'do') { if (stack[stack.length - 1] === 'loop') stack[stack.length - 1] = 'do'; else stack.push('do'); }
+  else if (t === 'end' || t === 'until') { if (!stack.length) return false; stack.pop(); }
+  else if (t === '(' || t === '[' || t === '{') stack.push('(');
+  else if (t === ')' || t === ']' || t === '}') { if (!stack.length) return false; stack.pop(); }
+  return true;
+}
+// 원문 구간을 로더에서 따로 실행해도 되는지 검사한다. 문제가 있으면 사유를 돌려준다.
+function rawSegmentIssue(toks, from, to, declared) {
+  const stack = [];
+  let hasFunction = false;
+  for (let q = from; q < to; q++) if (toks[q].t === 'function') hasFunction = true;
+  for (let q = from; q < to; q++) {
+    const t = toks[q].t;
+    const top = stack.length === 0;
+    if (t === 'local' && top) return '최상위 local 선언';
+    if (t === 'return' && top) return '최상위 return';
+    if (t === '...' && top && !hasFunction) return '최상위 ...';
+    if (t === 'name' && declared.has(toks[q].v) && !(q > from && (toks[q - 1].t === '.' || toks[q - 1].t === ':'))) {
+      return `지역 변수 '${toks[q].v}' 사용`;
+    }
+    if (!blockStep(stack, t)) return '블록 짝이 맞지 않음';
+  }
+  return null;
+}
+
+function parse(src, dl = DIALECTS['5.1'], segmented = false) {
   const toks = tokenize(src, dl);
   let p = 0;
-  const varargs = [true]; // 함수마다 vararg 여부 스택 (메인 청크는 vararg)
+  const varargs = [true];
   const cur = () => toks[p];
   const adv = () => toks[p++];
   const tokText = (tk) => (tk.t === 'eof' ? '<eof>'
@@ -334,7 +342,7 @@ function parse(src, dl = DIALECTS['5.1']) {
     } else {
       left = parseSimple();
     }
-    while (dl.luau && cur().t === '::') { adv(); skipType(); } // Luau 타입 캐스트는 코드를 만들지 않는다
+    while (dl.luau && cur().t === '::') { adv(); skipType(); }
     const PREC = dl.bitops ? BINPREC53 : BINPREC;
     for (;;) {
       const op = cur().t;
@@ -463,7 +471,7 @@ function parse(src, dl = DIALECTS['5.1']) {
         const name = expectName();
         e = { k: 'method', obj: e, name, args: parseArgs() };
       } else if (dl.luau && t === '<' && toks[p + 1].t === '<') {
-        skipBalanced('<', '>'); // Luau 명시적 타입 인자: f<<T>>(x)
+        skipBalanced('<', '>');
       } else if (t === '(' || t === 'str' || t === '{') {
         e = { k: 'call', fn: e, args: parseArgs() };
       } else {
@@ -474,7 +482,6 @@ function parse(src, dl = DIALECTS['5.1']) {
 
   function parseBlock() {
     const stats = [];
-    // Lua 5.1 문법: chunk ::= {stat [';']} [laststat [';']]. 문장 시작에 오는 ';'는 오류다.
     while (!BLOCK_END.has(cur().t)) {
       if (cur().t === 'return' || cur().t === 'break') {
         const kw = cur().t;
@@ -566,7 +573,6 @@ function parse(src, dl = DIALECTS['5.1']) {
     return { k: 'callstat', e };
   }
 
-  // Luau 복합 대입: a op= b 는 a = a op b. 인덱스 대상은 객체와 키를 한 번만 평가하도록 임시 지역으로 받는다.
   function compoundAssign(target, op, rhs) {
     if (target.k === 'name') return { k: 'assign', targets: [target], exps: [{ k: 'bin', op, a: target, b: rhs }] };
     const o = { k: 'name', name: '\0o' };
@@ -578,7 +584,6 @@ function parse(src, dl = DIALECTS['5.1']) {
     ] };
   }
 
-  // Luau if-식: if c then a elseif d then b else e
   function parseIfExpr() {
     adv();
     const clauses = [];
@@ -598,7 +603,6 @@ function parse(src, dl = DIALECTS['5.1']) {
     }
   }
 
-  // ── Luau 타입 주석 건너뛰기 (타입은 코드를 만들지 않는다) ──
   function skipBalanced(open, close) {
     let d = 0;
     do {
@@ -628,21 +632,19 @@ function parse(src, dl = DIALECTS['5.1']) {
     }
   }
   function skipType() {
-    if (dl.luau && (cur().t === '|' || cur().t === '&')) adv(); // 앞쪽 | 는 유니온 기호일 뿐이다
+    if (dl.luau && (cur().t === '|' || cur().t === '&')) adv();
     skipSimpleType();
     for (;;) {
       const t = cur().t;
       if (t === '?') { adv(); continue; }
       if (t === '|' || t === '&') { adv(); skipSimpleType(); continue; }
-      if (t === '...') { adv(); continue; } // 타입 팩 T...
+      if (t === '...') { adv(); continue; }
       return;
     }
   }
-  // 이름 뒤의 ': 타입' (지역 변수, 매개변수, 반환 타입)
   function skipAnnot() {
     if (dl.luau && cur().t === ':') { adv(); skipType(); }
   }
-  // function f<T>(...) 의 제네릭 목록
   function skipGenerics() {
     if (dl.luau && cur().t === '<') skipBalanced('<', '>');
   }
@@ -738,12 +740,66 @@ function parse(src, dl = DIALECTS['5.1']) {
     }
   }
 
+  if (segmented) return parseSegments();
   const body = parseBlock();
   if (cur().t !== 'eof') fail("'<eof>' expected");
   return { k: 'func', params: [], isVararg: true, body };
-}
 
-// ───────────── 컴파일 (AST → VM 함수 목록) ─────────────
+  // 최상위 문장을 하나씩 파싱한다. 실패한 문장은 다음 최상위 문장 시작까지 원문 구간({k:'raw'})으로 둔다.
+  function parseSegments() {
+    const body = [];
+    while (cur().t !== 'eof') {
+      if (cur().t === 'return' || cur().t === 'break') {
+        const kw = cur().t;
+        if (kw === 'break') { adv(); body.push({ k: 'break' }); } else body.push(parseReturn());
+        if (cur().t === ';') adv();
+        if (cur().t !== 'eof') fail(`'${kw}' must be the last statement in a block`);
+        break;
+      }
+      const start = p;
+      const vlen = varargs.length;
+      try {
+        body.push(parseStatement());
+        if (cur().t === ';') adv();
+      } catch (err) {
+        const end = rawEnd(start);
+        if (end < 0) throw err;
+        varargs.length = vlen;
+        body.push({ k: 'raw', from: start, to: end, msg: err.message });
+        p = end;
+      }
+    }
+    return { k: 'func', params: [], isVararg: true, body };
+  }
+
+  // start 이후에서 블록 깊이가 0인 곳에 오는 다음 최상위 문장 시작 토큰 위치 (없으면 -1)
+  function rawEnd(start) {
+    const stack = [];
+    for (let q = start; toks[q].t !== 'eof'; q++) {
+      if (q > start && stack.length === 0 && statementStartAt(q)) return q;
+      if (!blockStep(stack, toks[q].t)) return -1;
+    }
+    return -1;
+  }
+
+  function statementStartAt(q) {
+    const t = toks[q].t;
+    if (t === 'return' || t === 'break') return true;
+    if (!(t === 'name' || STAT_KW.has(t) || t === '::' || t === '(')) return false;
+    const savedP = p;
+    const savedV = varargs.length;
+    p = q;
+    try {
+      parseStatement();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      p = savedP;
+      varargs.length = savedV;
+    }
+  }
+}
 
 // 숫자 식을 컴파일 시점에 계산한다. 0으로 나누기, NaN 결과는 접지 않는다 (Lua 5.1 constfolding 과 같음).
 function foldNum(e) {
@@ -804,23 +860,20 @@ function constIndex(fs, v) {
   let i = fs.constIdx.get(key);
   if (i === undefined) {
     fs.consts.push(v);
-    i = fs.consts.length; // 1부터 시작
+    i = fs.consts.length;
     fs.constIdx.set(key, i);
   }
   return i;
 }
 const emitK = (fs, v) => emit(fs, 'PUSHK', constIndex(fs, v));
 
-// 블록을 열 때 그 시점의 활성 지역 수(base)를 기록해 두고, 닫을 때 되돌린다 (goto 범위 검사용)
 const pushLoop = (fs) => { const l = []; l.depth = fs.scopes.length; fs.loops.push(l); };
-// 블록 끝·break·return 에서 빠져나가는 scope 들의 to-be-closed 지역을 역순으로 닫는다
 function emitCloseFrom(fs, minIdx) {
   for (let i = fs.scopes.length - 1; i >= minIdx; i--) {
     const t = fs.scopes[i].tbc;
     if (t) for (let j = t.length - 1; j >= 0; j--) emit(fs, 'CLOSELOC', t[j].slot);
   }
 }
-// goto 대상 라벨의 블록 밖 scope 를 모두 닫는다. 같은 블록의 뒤쪽(후방 goto)은 라벨 뒤에 선언된 것만 닫는다.
 function emitGotoClose(fs, e) {
   if (e.depth === undefined) return;
   const lb = e.depth - 1;
@@ -828,7 +881,6 @@ function emitGotoClose(fs, e) {
   const t = fs.scopes[lb] && fs.scopes[lb].tbc;
   if (e.pos >= 0 && t) for (let j = t.length - 1; j >= 0; j--) if (t[j].pos >= e.pos) emit(fs, 'CLOSELOC', t[j].slot);
 }
-// 상수 지역 여부 (외부 함수의 지역까지 본다)
 function isConstName(fs, name) {
   for (let f = fs; f; f = f.parent) {
     for (let i = f.scopes.length - 1; i >= 0; i--) {
@@ -850,7 +902,6 @@ function declareLocal(fs, name) {
   return slot;
 }
 
-// 5.2+ 에서만 _ENV 를 특별하게 본다 (5.1에서는 그냥 이름이다). compileProgram이 방언에 맞춰 정한다.
 let ENV_SPECIAL = false;
 function envIsLocal(fs) { return ENV_SPECIAL && resolve(fs, '_ENV').kind !== 'global'; }
 function globalGet(fs, name) {
@@ -858,7 +909,6 @@ function globalGet(fs, name) {
   if (envIsLocal(fs)) { cget(fs, '_ENV'); emitK(fs, name); emit(fs, 'INDEX'); return; }
   emit(fs, 'GETG', constIndex(fs, name));
 }
-// 값이 스택 맨 위에 있을 때 전역에 쓴다
 function globalSet(fs, name) {
   if (name === '_ENV' && ENV_SPECIAL) throw new Error("assignment to global '_ENV' is not supported");
   if (envIsLocal(fs)) {
@@ -870,7 +920,6 @@ function globalSet(fs, name) {
   emit(fs, 'SETG', constIndex(fs, name));
 }
 
-// 이름 해석: 지역 → 상위 함수의 지역(업밸류) → 전역
 function resolve(fs, name) {
   for (let i = fs.scopes.length - 1; i >= 0; i--) {
     const slot = fs.scopes[i].get(name);
@@ -902,7 +951,6 @@ function cset(fs, name) {
   else globalSet(fs, name);
 }
 
-// 값 하나를 스택에 쌓는다
 function cexpr(fs, e) {
   switch (e.k) {
     case 'nil': emitK(fs, null); return;
@@ -914,7 +962,7 @@ function cexpr(fs, e) {
     case 'func': emit(fs, 'CLOSURE', buildProto(fs, e, fs.protos)); return;
     case 'table': ctable(fs, e); return;
     case 'name': cget(fs, e.name); return;
-    case 'gname': emit(fs, 'GETG', constIndex(fs, e.name)); return; // 지역 이름을 거치지 않는 전역 읽기 (내부용)
+    case 'gname': emit(fs, 'GETG', constIndex(fs, e.name)); return;
     case 'index':
       cexpr(fs, e.obj);
       cexpr(fs, e.key);
@@ -951,7 +999,6 @@ function cexpr(fs, e) {
       emit(fs, 'BIN', BIN_ID.get(e.op) ?? BIN_ID53.get(e.op));
       return;
     case 'ifexpr': {
-      // Luau if-식: 각 가지가 값 하나를 남기고 끝으로 점프한다
       const ends = [];
       for (const c of e.clauses) {
         cexpr(fs, c.cond);
@@ -969,13 +1016,11 @@ function cexpr(fs, e) {
   }
 }
 
-// 여러 값(팩)을 스택에 쌓는다: 호출 결과 전부 또는 ...
 function cmulti(fs, e) {
   if (e.k === 'vararg') emit(fs, 'VARPACK');
   else ccallPack(fs, e);
 }
 
-// 팩이 맨 위에 있을 때 인자들을 뒤에 덧붙인다 (마지막 인자가 다중값이면 전부 펼친다)
 function cappend(fs, args) {
   args.forEach((a, i) => {
     if (i === args.length - 1 && isMulti(a)) {
@@ -988,20 +1033,18 @@ function cappend(fs, args) {
   });
 }
 
-// 함수 호출: 결과 팩을 남긴다
 function ccallPack(fs, e) {
   if (e.k === 'call') {
     cexpr(fs, e.fn);
     emit(fs, 'NEWPACK');
   } else {
     cexpr(fs, e.obj);
-    emit(fs, 'SELF', constIndex(fs, e.name)); // 함수와 self 팩을 남긴다
+    emit(fs, 'SELF', constIndex(fs, e.name));
   }
   cappend(fs, e.args);
   emit(fs, 'CALLP');
 }
 
-// 식 목록을 정확히 n개 값으로 맞춰 스택에 쌓는다
 function cadjust(fs, exps, n) {
   for (let i = 0; i < exps.length; i++) {
     const e = exps[i];
@@ -1036,8 +1079,6 @@ function ctable(fs, e) {
 }
 
 function cblock(fs, stats) { openScope(fs); cstats(fs, stats); emitCloseFrom(fs, fs.scopes.length - 1); closeScope(fs); }
-// 라벨 범위: 블록마다 이름 → {pos, pend, atEnd} 표. 블록 시작에서 라벨을 미리 등록해 앞쪽 goto도 찾는다.
-// atEnd: 뒤에 라벨만 남은 블록 끝 라벨 (5.2에서 지역 scope 검사를 면제받는다)
 function pushLabels(fs, stats) {
   const m = new Map();
   stats.forEach((st, i) => {
@@ -1059,7 +1100,6 @@ function cstats(fs, stats) {
   for (const st of stats) cstat(fs, st);
   fs.labels.pop();
 }
-// 반복문의 continue (Luau): 본문 뒤, 증가·조건 평가 직전이 대상이다
 function pushContinue(fs) {
   const e = { pos: -1, pend: [] };
   fs.labels.push(new Map([[CONT, e]]));
@@ -1192,7 +1232,7 @@ function cstat(fs, st) {
       return;
     }
     case 'fornum': {
-      const base = newSlots(fs, 3); // 현재값, 한계값, 증가값
+      const base = newSlots(fs, 3);
       cexpr(fs, st.start); emit(fs, 'NEWLOC', base);
       cexpr(fs, st.limit); emit(fs, 'NEWLOC', base + 1);
       if (st.step) cexpr(fs, st.step); else emitK(fs, { num: '1' });
@@ -1218,7 +1258,7 @@ function cstat(fs, st) {
       return;
     }
     case 'forin': {
-      const base = newSlots(fs, 4); // f, s, 제어값, 마지막 결과 팩
+      const base = newSlots(fs, 4);
       cadjust(fs, st.exps, 3);
       emit(fs, 'NEWLOC', base + 2);
       emit(fs, 'NEWLOC', base + 1);
@@ -1265,10 +1305,9 @@ function cstat(fs, st) {
     }
     case 'label': {
       const e = fs.labels[fs.labels.length - 1].get(st.name);
-      const Lb = fs.scopes.length - 1; // 라벨이 놓인 블록의 scope 번호
+      const Lb = fs.scopes.length - 1;
       for (const p of e.pend) {
         if (!e.atEnd) {
-          // goto 시점의 활성 지역 수를 라벨 블록 기준으로 되돌린다
           const proj = p.snap.length > Lb + 1 ? p.snap[Lb + 1] : p.nact;
           if (fs.nact > proj) throw new Error(`<goto ${st.name}> jumps into the scope of local '${fs.lnames[proj]}'`);
         }
@@ -1283,7 +1322,6 @@ function cstat(fs, st) {
   }
 }
 
-// 함수 하나를 컴파일해 protos에 넣고, CLOSURE에 쓸 1부터 시작하는 번호를 돌려준다
 function buildProto(parent, fn, protos) {
   const idx = protos.length;
   protos.push(null); // 중첩 함수가 먼저 등록되더라도 번호가 어긋나지 않게 자리를 먼저 잡는다
@@ -1331,23 +1369,61 @@ function compileProgram(src, dl = DIALECTS['5.1']) {
   return protos;
 }
 
-// 방언 자동 선택: 5.1 → 5.2 → 5.3 → 5.4 → Luau → 혼합 순서로 처음 통과하는 것을 쓴다 (5.1 코드는 기존 결과와 같다).
-// 모두 실패하면 Luau 쪽 오류를 낸다 (가장 넓은 문법이라 메시지가 가장 일반적이다).
 const AUTO_ORDER = ['5.1', '5.2', '5.3', '5.4', 'luau', 'mixed'];
+// 지원하지 않는 최상위 문장만 원문으로 두고 나머지는 VM으로 컴파일한다. 원문 문장은 loadstring으로 실행한다.
+function compileSegmented(src, dl) {
+  ENV_SPECIAL = !!dl.goto;
+  CLASSIC_NUM = !dl.bitops && !dl.luau;
+  const toks = tokenize(src, dl);
+  const root = parse(src, dl, true);
+  const declared = new Set();
+  const body = [];
+  const rawLines = [];
+  for (const st of root.body) {
+    if (st.k !== 'raw') {
+      if (st.k === 'local') st.names.forEach((n) => declared.add(n));
+      else if (st.k === 'localfunc') declared.add(st.name);
+      body.push(st);
+      continue;
+    }
+    const issue = rawSegmentIssue(toks, st.from, st.to, declared);
+    if (issue) throw new Error(`${st.msg} (원문으로 남길 수 없음: ${issue})`);
+    rawLines.push(toks[st.from].line);
+    const text = src.slice(toks[st.from].s, toks[st.to].s);
+    const loader = { k: 'bin', op: 'or', a: { k: 'gname', name: 'loadstring' }, b: { k: 'gname', name: 'load' } };
+    const loaded = { k: 'call', fn: loader, args: [{ k: 'str', v: text }] };
+    body.push({ k: 'callstat', e: { k: 'call', fn: { k: 'call', fn: { k: 'gname', name: 'assert' }, args: [loaded] }, args: [] } });
+  }
+  if (ENV_SPECIAL && assignsEnv(body)) body.unshift({ k: 'local', names: ['_ENV'], exps: [{ k: 'gname', name: '_G' }] });
+  const protos = [];
+  buildProto(null, { k: 'func', params: [], isVararg: true, body }, protos);
+  return { protos, rawLines };
+}
+
 function compileAuto(src, dialect) {
   if (dialect !== 'auto') {
     const dl = DIALECTS[dialect];
     if (!dl) throw new Error(`알 수 없는 방언: ${dialect} (auto, 5.1, 5.2, 5.3, 5.4, luau, mixed 중 하나)`);
-    return { protos: compileProgram(src, dl), dialect };
+    return { protos: compileProgram(src, dl), dialect, rawLines: [] };
   }
   let last = null;
   for (const name of AUTO_ORDER) {
-    try { return { protos: compileProgram(src, DIALECTS[name]), dialect: name }; } catch (e) { last = e; }
+    try { return { protos: compileProgram(src, DIALECTS[name]), dialect: name, rawLines: [] }; } catch (e) { last = e; }
   }
-  throw last;
+  // 자동 선택에서만: 어느 방언으로도 안 되면 지원하지 않는 최상위 문장만 원문 구간으로 두고 다시 시도한다.
+  let best = null;
+  let reason = null;
+  for (const name of AUTO_ORDER) {
+    try {
+      const r = compileSegmented(src, DIALECTS[name]);
+      if (!best || r.rawLines.length < best.rawLines.length) best = { ...r, dialect: name };
+    } catch (e) {
+      if (!reason && e.message.includes('원문으로 남길 수 없음')) reason = e;
+    }
+  }
+  if (best) return best;
+  throw reason ?? last;
 }
-
-// ───────────── 출력 (런타임 + 바이트코드) ─────────────
 
 const OPNAMES = ['PUSHK', 'GETLOC', 'SETLOC', 'NEWLOC', 'GETUP', 'SETUP', 'GETG', 'SETG', 'INDEX', 'SETINDEX',
   'NEWTABLE', 'SETFIELD', 'SETIDX', 'SETPACK', 'BIN', 'UN', 'JMP', 'JMPF', 'JMPT', 'DUP', 'POP', 'NEWPACK',
@@ -1373,15 +1449,12 @@ const luaStr = (s) => {
   return out + '"';
 };
 
-// 블롭/문자열 인코딩 알파벳 (표준 base64). 이스케이프가 필요 없는 문자만 쓴다.
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-// 24비트 값 하나 → 문자 4개 (little-endian 6비트 단위)
 const pack24 = (v) => {
   let out = '';
   for (let k = 0; k < 4; k++) { out += B64[v % 64]; v = Math.floor(v / 64); }
   return out;
 };
-// 바이트 배열 → 문자열 (3바이트 = 24비트 그룹, 부족분은 0으로 채움)
 const packBytes = (bytes) => {
   let out = '';
   for (let i = 0; i < bytes.length; i += 3) {
@@ -1397,8 +1470,6 @@ const luaLit = (v) => {
   return String(v);
 };
 
-// VM 실행기 본체. 명령 하나마다 키가 달라지고(롤링 XOR), 디스패치는 이진 탐색 트리이며,
-// 문자열 상수는 함수마다 다른 키로 가려져 있고 처음 실행할 때 풀린다.
 // 키 계산식은 compileOps()의 lits 생성부와 반드시 같아야 한다 (rollKey 참고).
 const CASE_BODIES = {
   PUSHK: 'push(K[a])',
@@ -1487,7 +1558,6 @@ const CASE_BODIES = {
         end`,
 };
 
-// 케이스를 id 순으로 반씩 나눠 if/else 트리로 만든다. 잎 노드는 최대 4개까지 elseif 체인.
 function dispatchSource(OP) {
   const cases = Object.keys(CASE_BODIES)
     .map((name) => ({ id: OP[name], body: CASE_BODIES[name] }))
@@ -1496,7 +1566,6 @@ function dispatchSource(OP) {
   const leaf = (list) => shuffle(list)
     .map((c, i) => `${i ? 'elseif' : 'if'} op == ${c.id} then\n        ${c.body}`)
     .join('\n') + '\n        else\n        error("VM: bad opcode")\n        end';
-  // 분기 기준은 id 정렬 순서를 지키되, 왼쪽 크기는 빌드마다 달라진다
   const tree = (list) => {
     if (list.length <= 4) return leaf(list);
     const lo = Math.max(1, Math.floor(list.length / 3));
@@ -1556,7 +1625,7 @@ function runtimeSource(OP, KEY, KX, KY) {
     for i = 1, #s, 4 do
       local c1, c2, c3, c4 = string.byte(s, i, i + 3)
       local v = MAPV[c1] + MAPV[c2] * 64 + MAPV[c3] * 4096 + MAPV[c4] * 262144
-      local x = ((n % 1048576) * 2654435761 + sl + math.floor(n / 1048576) * 1013904223) % 8388608
+      local x = (n * 2654435761 + sl) % 8388608
       x = (x * x + KEY) % 8388608
       x = (x + prev * 131) % 8388608
       local plain = bxor(v, x)
@@ -1666,7 +1735,7 @@ function runtimeSource(OP, KEY, KX, KY) {
   end
   -- 함수 원형을 처음 쓸 때 한 번만 푼다: 명령 블롭, 상수, 업밸류 기술자
   local function ks(sl, n)
-    local x = ((n % 1048576) * 2654435761 + sl + math.floor(n / 1048576) * 1013904223) % 8388608
+    local x = (n * 2654435761 + sl) % 8388608
     return (x * x + KEY) % 8388608
   end
   -- Fletcher 류 체크섬 (mod 65521). st = {a, b}, 값은 0 이상 2^24 미만 정수
@@ -1774,9 +1843,6 @@ function runtimeSource(OP, KEY, KX, KY) {
   return W`;
 }
 
-// 기본 블록을 무작위 순서로 배치한다.
-//  - 블록 경계: 0번, 모든 점프 대상, 조건/무조건 점프 바로 다음
-//  - 블록이 무조건 점프나 반환으로 끝나지 않으면 원래 다음 블록으로 가는 JMP를 붙인다
 //  - 첫 블록은 항상 맨 앞에 둔다 (실행 시작점)
 function shuffleBlocks(code) {
   const n = code.length;
@@ -1793,7 +1859,6 @@ function shuffleBlocks(code) {
     const en = bi + 1 < bounds.length ? bounds[bi + 1] : n;
     return { start: st, body: code.slice(st, en) };
   });
-  // 각 블록 끝이 어디로 이어지는지 표시
   blocks.forEach((b, bi) => {
     const last = b.body[b.body.length - 1];
     const endsUncond = last && (last.op === 'JMP' || last.op === 'RETP');
@@ -1804,7 +1869,6 @@ function shuffleBlocks(code) {
     const j = 1 + randInt(0, i);
     [order[i], order[j]] = [order[j], order[i]];
   }
-  // 새 위치 계산 (블록 뒤에 필요한 JMP 포함)
   const newStart = new Map();
   let pos = 0;
   for (const bi of order) {
@@ -1825,26 +1889,16 @@ function shuffleBlocks(code) {
   return out;
 }
 
-// 가짜 코드를 무작위로 끼워 넣는다. 점프 대상은 원래 명령을 가리키도록 다시 매긴다.
-//  - 가짜 NOP: 그냥 끼워 넣음 (실행되며 아무 일도 안 함)
-//  - 죽은 블록: JMP로 건너뛰는 가짜 NOP 묶음 (실행 흐름에서는 절대 안 닿음, 정적 분석 노이즈)
-// density: 0(끔) ~ 6(최대). 표에 없는 값은 허용하지 않는다. 명령 하나 앞에 넣을 확률과 개수를 정한다.
-// nop, dead 는 명령 하나 앞에 넣을 확률(%). 값이 클수록 가짜 코드가 많다.
 const DENSITY = {
   0: { nop: 0, dead: 0 },
-  1: { nop: 20, dead: 14 },
-  2: { nop: 25, dead: 20 },
-  3: { nop: 33, dead: 25 },
-  4: { nop: 50, dead: 40 },
-  5: { nop: 70, dead: 60 },
-  6: { nop: 90, dead: 80 },
+  1: { nop: 4, dead: 6 },
+  2: { nop: 3, dead: 4 },
+  3: { nop: 2, dead: 3 },
 };
 function insertDecoys(code, density, consts) {
-  if (!(density in DENSITY)) throw new Error("density 는 0~6");
-  const cfg = DENSITY[density];
+  const cfg = DENSITY[density] ?? DENSITY[2];
   const newIdx = new Array(code.length + 1);
   const out = [];
-  // 죽은 값: NOP 또는 스택에 값을 올렸다 바로 버리는 쌍 (스택 효과 0이라 실행 결과가 같다)
   const junk = (count) => {
     for (let d = 0; d < count; d++) {
       if (randInt(0, 2) === 0) {
@@ -1855,41 +1909,38 @@ function insertDecoys(code, density, consts) {
       }
     }
   };
-  // 불투명 술어: 항상 참인 식을 매번 다른 상수와 형태로 만든다. 실행 흐름에서는 항상 점프로 건너뛴다.
   const K = (n) => { consts.push({ num: String(n) }); return consts.length; };
   const opaquePredicate = () => {
     const r = randInt(2, 90);
     const d = (op, a) => ({ op, a, b: 0, decoy: true });
     switch (randInt(0, 3)) {
-      case 0: // r*(r+1) % 2 == 0
+      case 0:
         return [d('PUSHK', K(r)), d('PUSHK', K(r + 1)), d('BIN', 3), d('PUSHK', K(2)), d('BIN', 12),
           d('PUSHK', K(0)), d('BIN', 6)];
-      case 1: // r*r >= 0
+      case 1:
         return [d('PUSHK', K(r)), d('PUSHK', K(r)), d('BIN', 3), d('PUSHK', K(0)), d('BIN', 11)];
-      case 2: // r ~= r+1
+      case 2:
         return [d('PUSHK', K(r)), d('PUSHK', K(r + 1)), d('BIN', 7)];
-      default: // 제곱수를 4로 나눈 나머지는 0 또는 1이므로 (r*r) % 4 ~= 2
+      default:
         return [d('PUSHK', K(r)), d('PUSHK', K(r)), d('BIN', 3), d('PUSHK', K(4)), d('BIN', 12),
           d('PUSHK', K(2)), d('BIN', 7)];
     }
   };
   code.forEach((ins, i) => {
-    if (randInt(0, 100) < cfg.dead) {
+    if (cfg.dead && randInt(0, cfg.dead) === 0) {
       if (randInt(0, 1) === 0) {
-        // 죽은 블록: JMP는 블록 끝을 가리키고, 사이의 NOP은 절대 실행되지 않는다
         const jmp = { op: 'JMP', a: 0, b: 0, decoy: true };
         out.push(jmp);
         junk(randInt(2, 6));
         jmp.a = out.length;
       } else {
-        // 불투명 술어 블록: 항상 참이라 JMPT가 건너뛰고, 사이의 NOP은 실행되지 않는다
         const jmp = { op: 'JMPT', a: 0, b: 0, decoy: true };
         out.push(...opaquePredicate(), jmp);
         junk(randInt(2, 5));
         jmp.a = out.length;
       }
     }
-    if (randInt(0, 100) < cfg.nop) junk(randInt(1, 3));
+    if (cfg.nop && randInt(0, cfg.nop) === 0) junk(randInt(1, 3));
     newIdx[i] = out.length;
     out.push({ ...ins });
   });
@@ -1901,104 +1952,11 @@ function insertDecoys(code, density, consts) {
 }
 
 // 런타임 안의 지역 변수 이름을 빌드마다 무작위로 바꾼다. 전역(error, select, table 등)과 테이블 필드(.c, .k 등)는 건드리지 않는다.
-const RENAME_LOCALS = ['H', 'KEY', 'G', 'C', 'K', 'L', 'S', 'sp', 'RP', 'V', 'U', 'U2', 'P', 'PR', 'pc', 'op', 'ki', 'idx',
+const RENAME_LOCALS = ['KEY', 'G', 'C', 'K', 'L', 'S', 'sp', 'RP', 'V', 'U', 'U2', 'P', 'PR', 'pc', 'op', 'ki', 'idx',
   'a', 'b', 'c', 'v', 'x', 'y', 's', 'i', 'j', 'k', 't', 'f', 'pk', 'src', 'obj', 'lim', 'st', 'proto', 'fl', 'ix',
   'ctl', 'out', 'r', 'p', 'push', 'pop', 'pack', 'dec', 'bxor', 'exec', 'BIN', 'UN', 'i0', 'l0', 's0', 'unblob',
   'fold', 'chkk', 'chkcode', 'prep', 'ks', 'kb', 'j', 'fa', 'fb', 'hdr1', 'hdr2', 'hdr3', 'hdr4', 'Up', 'es',
   'prev', 'plain', 'PM', 'GF0', 'trap', 'envcheck', 'timecheck', 'tchk', 'dbg', 'acc', 't0'];
-// 서로 다른 난수 n개 (lo 이상 hi 미만)
-function randomDistinct(n, lo, hi) {
-  const seen = new Set();
-  const out = [];
-  while (out.length < n) {
-    const v = randInt(lo, hi);
-    if (!seen.has(v)) { seen.add(v); out.push(v); }
-  }
-  return out;
-}
-
-// 런타임 헬퍼 함수는 정수 키 테이블 H[k] 를 거쳐 부른다. 키는 빌드마다 다르다 (이름만 바꾸는 것보다 구조가 달라진다).
-const HELPER_FNS = ['pack', 'unb64', 'dec', 'unblob', 'split', 'join', 'idiv', 'b32', 'bitw', 'bnot', '_dead',
-  'ks', 'fold', 'trap', 'envcheck', 'timecheck', 'chkk', 'chkcode', 'prep'];
-// 단어 단위 치환. 문자열과 -- 주석은 건너뛰고, 필드(.name, :name)는 바꾸지 않는다.
-function mapWords(src, fn) {
-  let out = '';
-  let i = 0;
-  while (i < src.length) {
-    const ch = src[i];
-    if (ch === '-' && src[i + 1] === '-') {
-      const end = src.indexOf('\n', i);
-      const stop = end < 0 ? src.length : end;
-      out += src.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      let j = i + 1;
-      while (j < src.length && src[j] !== ch) j += src[j] === '\\' ? 2 : 1;
-      out += src.slice(i, j + 1);
-      i = j + 1;
-      continue;
-    }
-    if (/[A-Za-z_]/.test(ch) && !/[A-Za-z0-9_]/.test(src[i - 1] || '')) {
-      let j = i;
-      while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
-      const word = src.slice(i, j);
-      const prev = src[i - 1] || '';
-      const prev2 = src[i - 2] || '';
-      const isField = prev === ':' || (prev === '.' && prev2 !== '.');
-      out += isField ? word : fn(word);
-      i = j;
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out;
-}
-// 런타임 텍스트를 빌드마다 바꾼다: 헬퍼를 H[k] 로 간접화하고, 쓸모없는 do 블록을 섞는다. 결과는 여전히 Lua 5.1이다.
-// 런타임의 주석(설계 설명)을 지운다. 문자열 리터럴 안의 -- 는 건드리지 않는다.
-function stripComments(src) {
-  let out = "";
-  let i = 0;
-  while (i < src.length) {
-    const ch = src[i];
-    if (ch === "\"" || ch === "\x27") {
-      let j = i + 1;
-      while (j < src.length && src[j] !== ch) j += src[j] === "\\" ? 2 : 1;
-      out += src.slice(i, j + 1);
-      i = j + 1;
-      continue;
-    }
-    if (ch === "-" && src[i + 1] === "-") {
-      const end = src.indexOf("\n", i);
-      i = end < 0 ? src.length : end;
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out.split("\n").filter((l) => l.trim() !== "").join("\n");
-}
-function hardenRuntime(src) {
-  const slots = {};
-  src = stripComments(src);
-  const keys = randomDistinct(HELPER_FNS.length, 1000, 9000000);
-  HELPER_FNS.forEach((n, i) => { slots[n] = keys[i]; });
-  let out = src;
-  for (const n of HELPER_FNS) {
-    out = out.replace(new RegExp(`local function ${n}\\(`), `H[${slots[n]}] = function(`);
-  }
-  out = mapWords(out, (w) => (Object.prototype.hasOwnProperty.call(slots, w) ? `H[${slots[w]}]` : w));
-  const lines = out.split('\n').map((line) => {
-    if (/^  H\[\d+\] = function\(/.test(line) && randInt(0, 2) === 0) {
-      return `  do local _q = ${randInt(1, 9999)} * ${randInt(1, 99)} % ${randInt(2, 97)} end\n${line}`;
-    }
-    return line;
-  });
-  return 'local H = {}\n' + lines.join('\n');
-}
-
 function makeNames() {
   const used = new Set();
   const names = {};
@@ -2016,7 +1974,6 @@ function renameLocals(src, names) {
   while (i < src.length) {
     const ch = src[i];
     if (ch === '"' || ch === "'") {
-      // 문자열 리터럴은 그대로 복사
       let j = i + 1;
       while (j < src.length && src[j] !== ch) j += src[j] === '\\' ? 2 : 1;
       out += src.slice(i, j + 1);
@@ -2052,14 +2009,15 @@ function fletcher(parts) {
   return b * 65521 + a;
 }
 
-export function obfuscateDetailed(src, opts = {}) {
-  const { protos, dialect } = compileAuto(utf8ToLatin1(src), opts.dialect ?? 'auto');
+const OUTPUT_HEADER = "--This file was protected using Custom VM Obfuscator v0.1 [https://jinhyuk.xyz/]\n\n--[[\n     ██╗██╗███╗   ██╗██╗  ██╗██╗   ██╗██╗   ██╗██╗  ██╗\n     ██║██║████╗  ██║██║  ██║╚██╗ ██╔╝██║   ██║██║ ██╔╝\n     ██║██║██╔██╗ ██║███████║ ╚████╔╝ ██║   ██║█████╔╝\n██   ██║██║██║╚██╗██║██╔══██║  ╚██╔╝  ██║   ██║██╔═██╗\n╚█████╔╝██║██║ ╚████║██║  ██║   ██║   ╚██████╔╝██║  ██╗\n ╚════╝ ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝\n\n]]\n\n";
 
-  // 명령 id 는 빌드마다 무작위 큰 값이다. 디스패치의 비교 상수가 1..40 같은 작은 수로 드러나지 않게 한다.
-  const ids = randomDistinct(OPNAMES.length, 1000, 8000000);
+export function obfuscateDetailed(source, opts = {}) {
+  const src = source.replace(/^#[^\n]*/, '');
+  const { protos, dialect, rawLines } = compileAuto(utf8ToLatin1(src), opts.dialect ?? 'auto');
+
+  const pool = shuffle(Array.from({ length: 254 }, (_, i) => i + 1));
   const OP = {};
-  const OPIDX = {};
-  OPNAMES.forEach((name, i) => { OP[name] = ids[i]; OPIDX[name] = i; });
+  OPNAMES.forEach((name, i) => { OP[name] = pool[i]; });
   const KEY = randInt(1, 0x7fffff);
   const KX = randInt(1, 0x7fffff);
   const KY = (KEY ^ KX) >>> 0;
@@ -2067,12 +2025,11 @@ export function obfuscateDetailed(src, opts = {}) {
   const names = makeNames();
   // 값 키 스트림: 값 번호 n과 함수 소금 sl로 비선형 키를 만든다. runtime의 unblob과 같은 식이어야 한다.
   const ksAt = (sl, n) => {
-    let x = ((n % 1048576) * 2654435761 + sl + Math.floor(n / 1048576) * 1013904223) % 8388608;
+    let x = (n * 2654435761 + sl) % 8388608;
     x = (x * x + KEY) % 8388608;
     return x;
   };
 
-  // 함수마다 별도의 Lua 함수 안에 상수 테이블을 넣어, 한 함수의 상수 개수 한계에 걸리지 않게 한다
   // 무결성 기대값은 KEY로 가려 두고, 런타임이 같은 식으로 다시 계산해 비교한다.
   const hEnc = (x) => (x ^ KEY) >>> 0;
   // 문자열 상수 바이트 키 (런타임 dec와 같은 식, j는 0부터)
@@ -2092,7 +2049,6 @@ export function obfuscateDetailed(src, opts = {}) {
     }
     protos.push({ code, consts: [], upvals: [], np: randInt(0, 4), isVararg: randInt(0, 2) === 1 });
   }
-  // 모든 프로토에 쓰지 않는 상수를 몇 개 섞어 상수 표의 모양을 흐린다
   for (const p of protos) {
     for (let n = randInt(2, 6); n > 0; n--) {
       if (randInt(0, 2) === 0) p.consts.push({ num: String(randInt(0, 1000000)) });
@@ -2105,13 +2061,13 @@ export function obfuscateDetailed(src, opts = {}) {
     const flat = [];
     const code = insertDecoys(shuffleBlocks(p.code), opts.density ?? 3, p.consts);
     // 함수마다 명령 번호를 다시 섞는다 (proto별 순열). 런타임은 pm 표로 원래 번호를 복원한다.
-    const perm = shuffle(Array.from({ length: OPNAMES.length }, (_, i) => i + 1)); // perm[명령 인덱스] = 저장 번호
-    const inv = new Array(OPNAMES.length);
-    perm.forEach((e, i) => { inv[e - 1] = ids[i]; }); // inv[저장 번호-1] = 명령 id (런타임 디스패치 비교 값)
+    const perm = shuffle(Array.from({ length: 254 }, (_, i) => i + 1));
+    const inv = new Array(254);
+    perm.forEach((e, i) => { inv[e - 1] = i + 1; });
     code.forEach((ins) => {
-      flat.push(perm[OPIDX[ins.op]], ins.a, ins.b);
+      flat.push(perm[OP[ins.op] - 1], ins.a, ins.b);
     });
-    if (flat.length >= 16777216) throw new Error('함수가 너무 큼 (명령 값 16777216개 이상)');
+    if (flat.length >= 1048576) throw new Error('함수가 너무 큼 (명령 값 1048576개 이상)');
     // 연쇄 암호화: n번째 키는 (n번 키 스트림 + 앞 명령 평문 * 131) mod 2^23. 한 칸만 고치면 뒤가 전부 깨진다.
     let blob = '';
     let prevPlain = 0;
@@ -2133,12 +2089,10 @@ export function obfuscateDetailed(src, opts = {}) {
     }
     // 상수 무결성 입력: 암호문 상태 그대로 (런타임 chkk가 복호화 전에 같은 순서로 읽는다)
     const hk = [];
-    // 문자열 상수는 상수마다 다른 바이트 키로 가린다. 런타임이 처음 실행할 때 푼다.
     const consts = p.consts.map((v, j) => {
       if (v === null) { hk.push(1); return 'nil'; }
       if (typeof v === 'boolean') { hk.push(2, v ? 1 : 0); return luaLit(v); }
       const isNum = typeof v === 'number' || (typeof v === 'object' && v !== null);
-      // 숫자 상수는 원문 표기를 가린 뒤 런타임에 tonumber로 되돌린다.
       const text = typeof v === 'string' ? v : (typeof v === 'object' ? v.num : String(v));
       const kj = (KEY + sl + j * 91) % 256;
       const bytes = [];
@@ -2156,7 +2110,7 @@ export function obfuscateDetailed(src, opts = {}) {
       + `hc = ${hEnc(hc)}, hk = ${hEnc(hkv)}, cs = ${hEnc(checkStride)}, cn = 0, pm = { ${inv.join(', ')} } } end)()`;
   });
 
-  const runtimeText = renameLocals(hardenRuntime(runtimeSource(OP, KEY, KX, KY)), names);
+  const runtimeText = renameLocals(runtimeSource(OP, KEY, KX, KY), names);
   const code = [
     `local ${name} = (function(${names.PR})`,
     runtimeText,
@@ -2173,10 +2127,10 @@ export function obfuscateDetailed(src, opts = {}) {
   // 출력은 항상 Lua 5.1 문법이어야 한다 (실행기 환경 요구사항). 어기면 내부 오류로 막는다.
   const bad = validateLua51(out);
   if (bad) throw new Error('내부 오류: 출력이 Lua 5.1 문법이 아님 — ' + bad);
-  return { code: out, vm: 1, raw: 0, dialect, lits, runtimeText, prName: names.PR };
+  const outCode = opts.header === false ? out : OUTPUT_HEADER + out;
+  return { code: outCode, vm: 1, raw: rawLines.length, rawLines, dialect, lits, runtimeText, prName: names.PR };
 }
 
-// 생성된 코드가 Lua 5.1 문법(Luau 실행기의 기반)인지 확인한다. 문제가 있으면 오류 메시지, 없으면 null.
 export function validateLua51(code) {
   try {
     for (const t of tokenize(code, DIALECTS['5.1'])) {
@@ -2193,56 +2147,20 @@ export const obfuscate = (src, opts = {}) => obfuscateDetailed(src, opts).code;
 // 배포용 묶음: 함수 원형(proto) 목록을 parts 개의 조각으로 나눈다. 조각은 각각 따로 난독화된 Lua 청크이며,
 // 청크를 실행하면 { [원래 번호] = 함수 데이터 } 표를 돌려준다. 엔진(런타임)은 평문 텍스트로 따로 준다.
 // 로더가 조각들을 받아 표를 합친 뒤 엔진에 넘기면 원래 프로그램이 실행된다.
-// 조각 번호와 원래 번호의 대응은 빌드마다 무작위라 조각 하나만으로는 함수 묶음을 알 수 없다.
 export function obfuscateBundle(src, opts = {}) {
   const N = opts.parts ?? 6;
   const r = obfuscateDetailed(src, opts);
   const order = shuffle(Array.from({ length: r.lits.length }, (_, i) => i));
   const groups = Array.from({ length: N }, () => []);
   order.forEach((k, n) => groups[n % N].push(k));
-  const partOpts = { dialect: '5.1', density: opts.density };
+  const partOpts = { dialect: '5.1', density: opts.density, header: false };
   const parts = groups.map((g) => {
     // 조각 본문(데이터 표)은 문자열 상수로 가려서 VM이 감싼다. 표 자체를 VM으로 컴파일하면 명령 수 한계를 넘는다.
-    // 조각 실행 시 문자열을 청크로 읽어 표를 돌려준다. 표 안의 값은 이미 암호화돼 있다.
     const body = g.map((k) => `  [${k + 1}] = ${r.lits[k]}`).join(',\n');
     return obfuscateDetailed(`return (loadstring or load)(${luaStr(`return {\n${body}\n}\n`)})()\n`, partOpts).code;
   });
   const engine = `return function(${r.prName})\n${r.runtimeText}\nend\n`;
   const bad = validateLua51(engine);
   if (bad) throw new Error('내부 오류: 엔진이 Lua 5.1 문법이 아님 — ' + bad);
-  return { code: r.code, engine, parts, count: r.lits.length };
-}
-
-// 난독화 끄기 묶음: VM 없이 원문 바이트를 같은 6조각 구조로 나눈다.
-// 조각 i 는 { [i+1] = "바이트" } 를 돌려주는 청크이고, 엔진은 조각을 이어 붙여 원문을 로드한다.
-// 로더·조각 검증(순서, fletcher, sha256) 프로토콜은 VM 묶음과 완전히 같다.
-const PLAIN_PARTS = 6;
-const PLAIN_ENGINE = `return function(PR)
-  local t = {}
-  for i = 1, ${PLAIN_PARTS} do t[i] = PR[i] end
-  local f, err = loadstring(table.concat(t))
-  if not f then error(err, 0) end
-  return f
-end
-`;
-// 바이트 배열을 ASCII만 쓰는 Lua 문자열 리터럴로 바꾼다 (\ddd 이스케이프, 어떤 바이트도 안전)
-function luaByteLiteral(bytes) {
-  let out = '"';
-  for (const b of bytes) {
-    out += b >= 32 && b <= 126 && b !== 34 && b !== 92 ? String.fromCharCode(b) : '\\' + String(b).padStart(3, '0');
-  }
-  return out + '"';
-}
-export function plainPart(index, bytes) {
-  return `return {[${index + 1}]=${luaByteLiteral(bytes)}}\n`;
-}
-// 가짜 응답용 평문 조각: 이어 붙이면 빈 청크가 되어 실행해도 아무 일도 없다
-export function plainDecoyPart(index) {
-  return `return {[${index + 1}]=""}\n`;
-}
-export function plainBundle(src) {
-  const bytes = new TextEncoder().encode(src);
-  const size = Math.ceil(bytes.length / PLAIN_PARTS);
-  const parts = Array.from({ length: PLAIN_PARTS }, (_, i) => plainPart(i, bytes.subarray(i * size, (i + 1) * size)));
-  return { code: src, engine: PLAIN_ENGINE, parts, count: 0 };
+  return { code: r.code, engine, parts, count: r.lits.length, raw: r.raw, rawLines: r.rawLines };
 }
