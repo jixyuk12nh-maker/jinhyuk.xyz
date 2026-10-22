@@ -1,6 +1,6 @@
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 import { obfuscate, obfuscateBundle, plainBundle, plainDecoyPart } from './obfuscator.js';
-import { withAutoSchema, ensureMigrated } from './autoschema.js';
+import { withAutoSchema } from './autoschema.js';
 const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 const OBJECT_META = { httpMetadata: { contentType: 'text/plain; charset=utf-8', cacheControl: 'no-store' } };
 const ROLES = ['owner', 'admin', 'user'];
@@ -340,7 +340,6 @@ async function recordInvalidScriptKey(env, request, scriptId) {
 export default {
   async fetch(request, rawEnv) {
     const env = { ...rawEnv, DB: withAutoSchema(rawEnv.DB) };
-    await ensureMigrated(rawEnv.DB);
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
