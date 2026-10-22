@@ -77,6 +77,12 @@
     if (!response.ok) {
       const error = new Error(data.error || `Request failed (${response.status})`);
       error.status = response.status;
+      // 보안 확인 쿠키 만료(30분) 시: 조회(GET)는 페이지를 다시 불러와 Turnstile 게이트를 띄운다.
+      // 저장(POST/PATCH/DELETE)은 입력값을 잃지 않도록 reload하지 않고 안내만 한다.
+      if (response.status === 403 && /browser verification/i.test(data.error || '')) {
+        if (!options.method || options.method === 'GET') location.reload();
+        else error.message = '보안 확인이 만료되었습니다. 페이지를 새로고침해 인증한 뒤 다시 저장하세요. (입력한 내용은 유지됩니다)';
+      }
       throw error;
     }
     return data;
