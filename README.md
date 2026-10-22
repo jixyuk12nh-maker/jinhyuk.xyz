@@ -91,20 +91,7 @@ npm run obfuscate -- 스크립트폴더 -o 출력폴더    # 폴더 안의 .lua 
 ```
 출력에는 `VM 구간 N개, 원문 구간 M개`가 나옵니다. 원문 구간이 많으면 난독화되지 않은 부분이 많다는 뜻입니다.
 
-## 보안 보호 (Turnstile / 자동 차단)
-
-### Turnstile 설정
-
-1. Cloudflare Dashboard → Turnstile에서 `jinhyuk.xyz` 도메인용 위젯을 생성합니다.
-2. 사이트 키를 Worker 변수 `TURNSTILE_SITE_KEY`로 설정합니다.
-3. 비밀 키는 공개 변수나 코드에 넣지 말고 Worker Secret으로 설정합니다.
-   ```sh
-   npx wrangler secret put TURNSTILE_SECRET_KEY
-   ```
-4. `TURNSTILE_HOSTNAME`은 `jinhyuk.xyz`로 설정합니다. 로컬 또는 다른 도메인에서 시험하려면 해당 호스트도 Turnstile에 등록하고 호스트 값을 맞춰야 합니다.
-5. 두 키가 모두 설정되면 첫 브라우저 진입에 Turnstile을 표시하고, 성공 후 30분 동안 유효한 서명된 HttpOnly 쿠키를 발급합니다. 브라우저 API 요청도 해당 쿠키를 확인합니다.
-
-키를 설정하지 않으면 Turnstile 검사는 활성화되지 않습니다. 배포 후 `GET /api/health` 응답의 `turnstile` 값이 `true`인지 확인하세요.
+## 보안 보호 (자동 차단)
 
 ### 공격 시도 대응
 
@@ -168,7 +155,7 @@ npm test
 ## 한계
 - 키리스 원문과 키 모드 로더는 누구나 받을 수 있습니다. 키 모드의 실제 코드는 유효한 키에만 내주지만, 키를 받은 사람은 그 코드를 복사할 수 있습니다.
 - 브라우저 여부는 요청 헤더로 판단합니다. 헤더를 직접 조작하면 구분할 수 없습니다.
-- 요청 방어는 Turnstile 및 반복 인증 실패 기반 자동 차단을 포함합니다. 모든 경로에 대한 정교한 분산 rate limit은 Cloudflare 대시보드의 WAF/Rate Limiting 규칙도 함께 설정해야 합니다.
+- 요청 방어는 반복 인증 실패 기반 자동 차단을 포함합니다. 모든 경로에 대한 정교한 분산 rate limit은 Cloudflare 대시보드의 WAF/Rate Limiting 규칙도 함께 설정해야 합니다.
 - 최상위 `local` 변수는 원본과 같이 `_G`에 나타나지 않습니다 (실행 결과와 `rawget(_G, ...)` 모두 원본과 같음, `ls` 테스트로 확인).
 - 원문은 작성자와 소유자만 볼 수 있습니다. 관리자라도 작성자가 아니면 볼 수 없습니다.
 - 주요 작업과 인증 실패는 `api_audit_logs`에 기록됩니다.

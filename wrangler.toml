@@ -22,5 +22,3 @@ bucket_name = "jinhyuk--xyz"
 
 [vars]
 MAX_SCRIPT_BYTES = "41943040"
-TURNSTILE_HOSTNAME = "jinhyuk.xyz"
-TURNSTILE_SITE_KEY = "0x4AAAAAAFdwb0gNSDv8gtDM"
