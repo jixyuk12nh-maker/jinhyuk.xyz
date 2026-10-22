@@ -4,9 +4,6 @@
   "main": "src/worker.js",
   "compatibility_date": "2026-10-13",
   "workers_dev": true,
-  "routes": [
-    { "pattern": "jinhyuk.xyz", "custom_domain": true }
-  ],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -28,7 +25,9 @@
     }
   ],
   "vars": {
-    "MAX_SCRIPT_BYTES": "41943040"
+    "MAX_SCRIPT_BYTES": "524288",
+    "TURNSTILE_HOSTNAME": "jinhyuk.xyz",
+    "TURNSTILE_SITE_KEY": "0x4AAAAAAFdwb0gNSDv8gtDM"
   },
   "keep_vars": true
 }
