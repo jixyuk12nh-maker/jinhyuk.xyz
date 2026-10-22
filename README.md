@@ -28,6 +28,8 @@ API 키는 앱사이트 로그인용이며, **계정(사용자)마다** 발급�
 
 ## 난독화 (스크립트 저장 시 자동 적용)
 스크립트를 저장하면 `src/obfuscator.js`의 내장 VM 난독화기가 원문을 바이트코드 VM 코드로 바꿉니다.
+- 가짜 코드 밀도는 입력 크기에 따라 정해진다 (64KB 이하 6, 160KB 이하 4, 그 이상 3). CLI 기본값은 6.
+- 스크립트마다 **VM Obfuscation** 체크로 끌 수 있습니다 (API: `vm_obfuscate: false`, 마이그레이션 0020). 끄면 원문 그대로 저장·서빙하며, 키 모드는 같은 6조각 전송·검증을 거칩니다. 설정만 바꿔도 저장된 원문으로 번들을 다시 만듭니다.
 - 원문: R2의 `scripts/<id>.raw.lua` (작성자와 소유자의 `POST /api/execute`에서만 나옴)
 - 난독화본: R2의 `scripts/<id>.lua` (로드스트링, 키 모드 검증 응답)
 
@@ -44,19 +46,8 @@ R2 객체는 짝으로 저장되며 서로를 메타데이터로 가리킵니다
 - `scripts/<id>.lua`: `role=obfuscated`, `obfuscated=1`, `pair=scripts/<id>.raw.lua`, `scriptId`, `sha256`(원문)
 D1의 `hosted_scripts.object_key`와 `raw_object_key`가 기준 연결이고, R2 메타데이터는 R2 콘솔에서 짝을 확인하기 위한 표시입니다.
 
-Lua 5.1, 5.2, 5.3, Luau 문법을 지원하며(아래 방언 참고), 지원하는 문장은 모두 VM으로 바꿉니다.
-외부 서버나 secret 설정은 필요 없습니다.
-
-### 지원하지 않는 문장 (원문 구간)
-자동 방언(`auto`)에서 어느 방언으로도 파싱되지 않을 때만 동작합니다. 파일 전체를 실패로 막지 않고, **지원하지 않는 최상위 문장 하나만** 원문으로 남기고 나머지는 VM으로 바꿉니다.
-- 원문 문장은 출력에 `assert((loadstring or load)("..."))()` 호출로 들어가며(실행 시 구문 오류는 원래 메시지로 나옵니다), 실행 순서는 그대로 유지됩니다. 원문 문장의 내용은 VM 문자열 상수로 가려지지만, 원문 구간은 보호 강도가 VM 코드보다 약합니다.
-- 다음 경우에는 원문으로 두지 않고 원래 오류로 저장을 막습니다: 원문 문장이 최상위 `local`을 선언하거나, 앞의 VM 코드의 지역 변수를 쓰거나, 최상위 `return`/`...`를 쓰는 경우.
-- 명시한 방언(`--dialect 5.1` 등)은 원문 구간을 쓰지 않고 엄격하게 거부합니다.
-- 저장 응답의 `raw_lines`와 저장 알림에 원문으로 남은 줄 번호가 표시됩니다.
-- **주의**: 원문 구간은 Lua 구문 오류와 구별할 수 없습니다. 오타가 있는 문장도 원문으로 남으면 저장은 통과하고, 실행할 때 오류가 납니다. 이 파서에는 Luau 파서가 없어서 원문 문장의 문법은 검사하지 않습니다.
-- 첫 줄의 `#!` (shebang)은 무시합니다. 줄 번호는 유지됩니다.
-
-토큰 단계에서 실패하는 경우(잘못된 숫자 표기, 닫히지 않은 문자열, ASCII가 아닌 식별자 등)는 원문 구간으로 바꾸지 않고 저장을 막습니다.
+Lua 5.1, 5.2, 5.3, Luau 문법을 지원하며(아래 방언 참고), 원문 구간을 남기지 않고 모든 문장을 VM으로 바꿉니다.
+외부 서버나 secret 설정은 필요 없습니다. 난독화 중 구문 오류가 나면 422로 저장이 막힙니다.
 마이그레이션 0013(`raw_object_key`, `obfuscated` 컬럼)을 적용해야 합니다. 0013 이전에 저장된 스크립트는 원문 그대로 서빙되므로, 수정 저장하면 난독화본으로 바뀝니다.
 
 ## 방언 (Lua 5.1 / 5.2 / 5.3 / Luau)
@@ -68,7 +59,7 @@ Lua 5.1, 5.2, 5.3, Luau 문법을 지원하며(아래 방언 참고), 지원하�
 | 5.4 | 5.3 전체 + 지역 속성 `<const>`, `<close>` (to-be-closed 값은 블록 끝, `break`, `return`, `goto` 로 나갈 때 `__close` 호출) |
 | luau | `type`/`export type`, `:` 타입 주석, `<T>` 제네릭, `f<<T>>()` 명시 호출, `T...` 타입 팩, `->` 함수 타입, `::` 캐스트, `+= -= *= /= %= ^= ..=`, `continue`, if-식, 백틱 보간 문자열, `0b`/`_` 숫자, typed `for`, `@속성` |
 
-- 기본값 `auto`: 5.1 → 5.2 → 5.3 → 5.4 → luau → mixed 순서로 처음 통과하는 방언을 씁니다. 5.1 코드는 기존과 같은 결과가 나옵니다. 어느 방언으로도 안 되면 위의 원문 구간을 시도합니다.
+- 기본값 `auto`: 5.1 → 5.2 → 5.3 → luau 순서로 처음 통과하는 방언을 씁니다. 5.1 코드는 기존과 같은 결과가 나옵니다.
 - CLI: `npm run obfuscate -- 원본.lua --dialect luau`처럼 방언을 고를 수 있습니다.
 - 5.3 정수 연산은 5.3 실행기에서는 내장 연산을 써서 원본과 완전히 같습니다. 5.1 계열 실행기(예: Roblox)에서는 근사 구현을 쓰며, 결과가 ±2^53을 넘는 값은 부동소수점으로 근사됩니다.
 - 5.1 상수 접기: 숫자 연산 식은 컴파일 시점에 계산하고, 상수 표는 값으로 구분합니다 (Lua 5.1과 같음). 그래서 `(- 0)`의 부호 0이 실제 5.1과 같게 나옵니다. 5.3과 Luau는 정수 부분형 때문에 접지 않습니다.
@@ -137,7 +128,7 @@ npm test
    `npx wrangler d1 execute tm-db --remote --command "SELECT name FROM sqlite_master WHERE type='table';"`
 2. D1을 백업한 뒤 마이그레이션을 적용합니다. (0011은 더 이상 쓰지 않는 `key_run_failures` 테이블을 삭제합니다.)
    `npm run db:migrate:remote`
-3. 배포합니다.
+3. 배포합니다. (0020 `vm_obfuscate` 컬럼 추가 포함)
    `npm run check && npm run deploy`
 
 ## 최초 소유자 만들기
@@ -188,7 +179,7 @@ Key-protected scripts now use a six-chunk delivery flow. The Worker creates a 12
 This raises extraction difficulty but is not DRM: a client that receives and executes Lua code can still dump or reconstruct it. Use server-side logic for sensitive decisions and rotate/revoke exposed keys.
 
 ## 난독화 강도와 검증 (VM 강화 버전)
-- 밀도: `obfuscate(src, { density })` 또는 CLI `--density 0~3` (0 끔, 3 기본). 가짜 NOP, 점프로 건너뛰는 죽은 블록, 불투명 술어 블록을 넣는다. 기본 블록은 무작위 순서로 배치된다.
+- 밀도: `obfuscate(src, { density })` 또는 CLI `--density 0~6` (0 끔, 6 기본 = 최대). 가짜 NOP, 점프로 건너뛰는 죽은 블록, 불투명 술어 블록을 넣는다. 기본 블록은 무작위 순서로 배치된다.
 - 명령 블롭: 명령 값은 값마다 다른 비선형 키 스트림으로 가려져 있고, 로드 때 한 번만 푼다. 출력에 평문 숫자 배열이 없다.
 - 상수: 문자열과 숫자 상수는 상수마다 다른 키로 가린다. 런타임 지역 변수 이름은 빌드마다 무작위다.
 - 한계: 런타임이 스크립트 안에 같이 들어가므로 충분한 시간이면 복원 가능하다. 에러 메시지의 줄 번호는 난독화본 기준이다. 안티 변조 블록(`antitamper.js`)은 원문 그대로 붙는다.
