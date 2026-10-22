@@ -20,5 +20,7 @@ for (const t of tables) {
   schema[t.name] = [ddl, ...indexes.filter((i) => i.tbl_name === t.name).map((i) => i.sql.replace(/^CREATE (UNIQUE )?INDEX\s+/i, (m, u) => `CREATE ${u ?? ''}INDEX IF NOT EXISTS `))];
 }
 const body = Object.entries(schema).map(([name, stmts]) => `  ${JSON.stringify(name)}: ${JSON.stringify(stmts)},`).join('\n');
+const migrationList = files.map((name) => ({ name, sql: readFileSync(join(root, "migrations", name), "utf8") }));
+writeFileSync(join(root, "src", "migrations.js"), "// 자동 생성 파일 (scripts/build-schema.mjs). 직접 고치지 마세요.\nexport const MIGRATIONS = " + JSON.stringify(migrationList, null, 1) + ";\n");
 writeFileSync(join(root, 'src', 'schema.js'), `// 자동 생성 파일 (scripts/build-schema.mjs). 직접 고치지 마세요.\nexport const SCHEMA = {\n${body}\n};\n`);
 console.log(`tables ${tables.length}, indexes ${indexes.length} -> src/schema.js`);
