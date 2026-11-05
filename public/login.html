@@ -37,6 +37,25 @@
   const btn = document.getElementById('submitBtn');
   const msg = document.getElementById('msg');
   const say = (text, ok) => { msg.textContent = text; msg.className = 'msg' + (ok ? ' ok' : ''); };
+  const CACHE_KEY = 'jinhyuk-workspace-cache';
+
+  async function warmCache(key, role) {
+    const h = { authorization: 'Bearer ' + key };
+    const get = (p) => fetch(p, { headers: h }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    try {
+      let cache;
+      if (role === 'user') {
+        const [p, s] = await Promise.all([get('/api/projects'), get('/api/scripts')]);
+        if (!p || !s) return;
+        cache = { projects: p.projects || [], scripts: s.scripts || [], banned: [], usage: { obfuscations: 0, limit: null } };
+      } else {
+        const d = await get('/api/dashboard');
+        if (!d) return;
+        cache = { projects: d.projects || [], scripts: d.scripts || [], banned: d.banned_ips || [], usage: d.usage || { obfuscations: 0, limit: null } };
+      }
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ k: key, role, ...cache }));
+    } catch {}
+  }
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -48,6 +67,7 @@
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.user) throw new Error(res.status === 401 ? 'API 키가 맞지 않거나 차단되었습니다.' : (data.error || '확인에 실패했습니다.'));
       localStorage.setItem(TOKEN_KEY, key);
+      await warmCache(key, data.user.role);
       say('로그인 성공. 이동합니다...', true);
       if (window.opener && !window.opener.closed) {
         try { window.opener.location.href = '/admin#projects'; } catch {}
